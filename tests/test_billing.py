@@ -227,3 +227,29 @@ class TestStripeClientErrorHandling:
             expected_seconds = pkg["credits_cents"] / CENTS_PER_SECOND
             # credits should fully buy the described video seconds
             assert expected_seconds > 0, f"{pkg_id} has no video time"
+
+
+# ---------------------------------------------------------------------------
+# claim_stripe_event — idempotency guard
+# ---------------------------------------------------------------------------
+
+class TestClaimStripeEvent:
+    def test_first_claim_returns_true(self):
+        from src.billing.store import claim_stripe_event
+        assert claim_stripe_event("evt_001") is True
+
+    def test_duplicate_claim_returns_false(self):
+        from src.billing.store import claim_stripe_event
+        claim_stripe_event("evt_002")
+        assert claim_stripe_event("evt_002") is False
+
+    def test_different_event_ids_are_independent(self):
+        from src.billing.store import claim_stripe_event
+        assert claim_stripe_event("evt_003") is True
+        assert claim_stripe_event("evt_004") is True
+
+    def test_many_duplicates_all_return_false(self):
+        from src.billing.store import claim_stripe_event
+        claim_stripe_event("evt_005")
+        for _ in range(5):
+            assert claim_stripe_event("evt_005") is False
