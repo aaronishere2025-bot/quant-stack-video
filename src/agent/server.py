@@ -34,6 +34,13 @@ from slowapi.util import get_remote_address
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Billing — credit amounts
+# ---------------------------------------------------------------------------
+
+def _billing_enabled() -> bool:
+    return bool(os.environ.get("STRIPE_SECRET_KEY"))
+
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -65,6 +72,15 @@ def require_api_key(
             detail="Invalid or missing X-API-Key header",
             headers={"WWW-Authenticate": "ApiKey"},
         )
+
+
+def _get_caller_key(request: Request) -> Optional[str]:
+    """Return the API key from the request, or None for localhost/open-mode callers."""
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1"):
+        return None  # localhost bypass — no billing
+    key = request.headers.get("X-API-Key", "").strip()
+    return key if key else None
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +320,7 @@ def create_app() -> FastAPI:
         """Generate a video with a single quantization pass."""
         task_id = str(uuid.uuid4())
         _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
 
         async def job():
             await _run_single_gen(task_id, req)
@@ -321,6 +338,7 @@ def create_app() -> FastAPI:
         """Generate a video with multi-pass quantization stacking."""
         task_id = str(uuid.uuid4())
         _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
 
         async def job():
             await _run_stacked_gen(task_id, req)
@@ -338,6 +356,7 @@ def create_app() -> FastAPI:
         """Generate a long video (up to 3 minutes) with segment stitching."""
         task_id = str(uuid.uuid4())
         _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
 
         async def job():
             await _run_long_gen(task_id, req)
@@ -388,7 +407,221 @@ def create_app() -> FastAPI:
         await _enqueue(task_id, job)
         return {"task_id": task_id, "status": "queued", "queue_position": _job_queue.qsize() - 1}
 
+    # -----------------------------------------------------------------------
+    # Billing endpoints
+    # -----------------------------------------------------------------------
+
+    @app.get("/billing/balance")
+    @limiter.limit("60/minute")
+    def billing_balance(request: Request, _auth=Depends(require_api_key)):
+        """Return credit balance for the caller's API key."""
+        from ..billing.store import get_balance, CENTS_PER_SECOND
+        key = _get_caller_key(request)
+        if key is None:
+            return {"balance_cents": None, "note": "localhost callers are not billed"}
+        balance = get_balance(key)
+        return {
+            "balance_cents": balance,
+            "balance_dollars": round(balance / 100, 2),
+            "seconds_remaining": round(balance / CENTS_PER_SECOND, 1),
+        }
+
+    @app.get("/billing/usage")
+    @limiter.limit("60/minute")
+    def billing_usage(request: Request, limit: int = 50, _auth=Depends(require_api_key)):
+        """Return recent usage records for the caller's API key."""
+        from ..billing.store import get_usage
+        key = _get_caller_key(request)
+        if key is None:
+            return []
+        records = get_usage(key, limit=min(limit, 200))
+        return [
+            {
+                **r,
+                "cost_dollars": round(r["cost_cents"] / 100, 4),
+            }
+            for r in records
+        ]
+
+    @app.post("/billing/checkout")
+    @limiter.limit("10/minute")
+    def billing_checkout(request: Request, package_id: str = "standard", _auth=Depends(require_api_key)):
+        """
+        Create a Stripe Checkout session to purchase credits.
+        package_id: 'starter' ($5, 50s), 'standard' ($10, 100s), 'pro' ($25, 250s)
+        Returns {"url": "https://checkout.stripe.com/..."}.
+        """
+        if not _billing_enabled():
+            raise HTTPException(status_code=503, detail="Billing not configured (STRIPE_SECRET_KEY not set)")
+        from ..billing.stripe_client import create_checkout_session, CREDIT_PACKAGES
+        key = _get_caller_key(request)
+        if key is None:
+            raise HTTPException(status_code=400, detail="Cannot create checkout session for localhost callers")
+        base_url = os.environ.get("BILLING_BASE_URL", f"http://{request.headers.get('host', 'localhost:8400')}")
+        try:
+            result = create_checkout_session(package_id, key, base_url=base_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        return {**result, "package": CREDIT_PACKAGES[package_id]}
+
+    @app.post("/billing/webhook")
+    async def billing_webhook(request: Request):
+        """Stripe webhook — grants credits on successful payment. No auth required."""
+        if not _billing_enabled():
+            raise HTTPException(status_code=503, detail="Billing not configured")
+        from ..billing.stripe_client import handle_webhook
+        from ..billing.store import add_credits
+        payload = await request.body()
+        sig = request.headers.get("stripe-signature", "")
+        try:
+            action = handle_webhook(payload, sig)
+        except Exception as e:
+            logger.warning("Stripe webhook error: %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+        if action and action["action"] == "grant_credits":
+            new_balance = add_credits(action["api_key"], action["credits_cents"])
+            logger.info(
+                "Granted %d cents to %s…  new balance=%d",
+                action["credits_cents"], action["api_key"][:8], new_balance,
+            )
+        return {"received": True}
+
+    @app.get("/billing/packages")
+    @limiter.limit("60/minute")
+    def billing_packages(request: Request):
+        """List available credit packages."""
+        from ..billing.stripe_client import CREDIT_PACKAGES
+        return [
+            {
+                "id": pkg_id,
+                "name": pkg["name"],
+                "price_dollars": round(pkg["amount_cents"] / 100, 2),
+                "video_seconds": pkg["credits_cents"] // 10,
+                "description": pkg["description"],
+            }
+            for pkg_id, pkg in CREDIT_PACKAGES.items()
+        ]
+
+    @app.get("/dashboard", response_class=None)
+    @limiter.limit("60/minute")
+    def dashboard(request: Request, _auth=Depends(require_api_key)):
+        """Simple HTML dashboard showing credit balance and usage history."""
+        from fastapi.responses import HTMLResponse
+        from ..billing.store import get_balance, get_usage, CENTS_PER_SECOND
+
+        key = _get_caller_key(request)
+        purchase_msg = request.query_params.get("purchase", "")
+
+        if key:
+            balance = get_balance(key)
+            usage = get_usage(key, limit=20)
+        else:
+            balance = None
+            usage = []
+
+        balance_html = (
+            f"<p><strong>Balance:</strong> ${balance/100:.2f} ({balance/CENTS_PER_SECOND:.1f}s of video)</p>"
+            if balance is not None
+            else "<p>Localhost caller — billing not applicable.</p>"
+        )
+
+        purchase_banner = ""
+        if purchase_msg == "success":
+            purchase_banner = '<div class="banner success">Payment successful! Credits added to your account.</div>'
+        elif purchase_msg == "cancelled":
+            purchase_banner = '<div class="banner warn">Purchase cancelled.</div>'
+
+        packages_html = ""
+        if _billing_enabled():
+            packages_html = """
+            <h2>Buy Credits</h2>
+            <div class="packages">
+              <form method="post" action="/billing/checkout?package_id=starter">
+                <button type="submit">Starter — $5 (50 s)</button>
+              </form>
+              <form method="post" action="/billing/checkout?package_id=standard">
+                <button type="submit">Standard — $10 (100 s)</button>
+              </form>
+              <form method="post" action="/billing/checkout?package_id=pro">
+                <button type="submit">Pro — $25 (250 s)</button>
+              </form>
+            </div>"""
+
+        rows_html = ""
+        if usage:
+            rows_html = "".join(
+                f"<tr><td>{r['task_id'] or '—'}</td><td>{r['seconds']:.1f}s</td>"
+                f"<td>${r['cost_cents']/100:.4f}</td></tr>"
+                for r in usage
+            )
+        else:
+            rows_html = "<tr><td colspan='3'>No usage yet.</td></tr>"
+
+        html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Quant-Stack Dashboard</title>
+<style>
+  body {{ font-family: monospace; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #0d0d0d; color: #e0e0e0; }}
+  h1 {{ color: #7cf; }} h2 {{ color: #9af; margin-top: 2em; }}
+  .banner {{ padding: 10px 16px; border-radius: 4px; margin: 1em 0; }}
+  .success {{ background: #1a3a1a; color: #7f7; border: 1px solid #4a4; }}
+  .warn {{ background: #3a2a0a; color: #fb7; border: 1px solid #a84; }}
+  .packages {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 1em 0; }}
+  .packages button {{ background: #1a2a3a; color: #7cf; border: 1px solid #37f; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-size: 1em; }}
+  .packages button:hover {{ background: #1e3a5a; }}
+  table {{ border-collapse: collapse; width: 100%; margin-top: 1em; }}
+  th, td {{ border: 1px solid #333; padding: 8px 12px; text-align: left; }}
+  th {{ background: #1a1a2a; color: #9af; }}
+</style>
+</head><body>
+<h1>Quant-Stack Video</h1>
+{purchase_banner}
+<h2>Credit Balance</h2>
+{balance_html}
+{packages_html}
+<h2>Recent Usage</h2>
+<table>
+  <thead><tr><th>Task ID</th><th>Duration</th><th>Cost</th></tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</body></html>"""
+        return HTMLResponse(content=html)
+
     return app
+
+
+# ---------------------------------------------------------------------------
+# Billing helpers  (used inside job runners)
+# ---------------------------------------------------------------------------
+
+# task_id -> api_key map so background runners can bill after queuing
+_task_api_keys: Dict[str, str] = {}
+
+
+def _register_task_key(task_id: str, api_key: Optional[str]) -> None:
+    if api_key:
+        _task_api_keys[task_id] = api_key
+
+
+def _deduct_for_task(task_id: str, num_frames: int, fps: int) -> None:
+    """Deduct credits after a generation job completes."""
+    if not _billing_enabled():
+        return
+    key = _task_api_keys.pop(task_id, None)
+    if not key:
+        return
+    seconds = num_frames / max(fps, 1)
+    from ..billing.store import deduct_credits
+    result = deduct_credits(key, seconds, task_id=task_id)
+    if not result["ok"]:
+        logger.warning("Billing deduction failed for task %s: %s", task_id, result)
+    else:
+        logger.info(
+            "Billed %.1fs ($%.4f) to key %s… task=%s",
+            seconds, result["cost_cents"] / 100, key[:8], task_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +654,7 @@ async def _run_single_gen(task_id: str, req: SinglePassRequest):
             fps=req.fps,
         )
         _registry.update(task_id, status="done", result={"output_path": saved})
+        _deduct_for_task(task_id, req.num_frames, req.fps)
     except Exception as e:
         logger.exception("Task %s failed", task_id)
         _registry.update(task_id, status="error", error=str(e))
@@ -455,6 +689,7 @@ async def _run_stacked_gen(task_id: str, req: StackedRequest):
             fps=req.fps,
         )
         _registry.update(task_id, status="done", result=result)
+        _deduct_for_task(task_id, req.num_frames, req.fps)
     except Exception as e:
         logger.exception("Task %s failed", task_id)
         _registry.update(task_id, status="error", error=str(e))
@@ -489,6 +724,8 @@ async def _run_long_gen(task_id: str, req: LongVideoRequest):
             cache_dir=req.cache_dir,
         )
         _registry.update(task_id, status="done", result=result)
+        total_frames = int(req.duration_seconds * req.fps)
+        _deduct_for_task(task_id, total_frames, req.fps)
     except Exception as e:
         logger.exception("Task %s failed", task_id)
         _registry.update(task_id, status="error", error=str(e))
