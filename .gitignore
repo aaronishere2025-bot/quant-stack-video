@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch / ML
+*.pt
+*.pth
+*.gguf
+*.bin
+*.safetensors
+
+# Model cache
+.cache/
+models/
+model_cache/
+
+# Benchmark outputs (large files)
+outputs/
+benchmark_outputs/
+*_frames.npy
+*.mp4
+*.avi
+
+# Agent state
+agent_state.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# Logs
+*.log
+logs/
+
+# Secrets / env
+.env
+.env.*

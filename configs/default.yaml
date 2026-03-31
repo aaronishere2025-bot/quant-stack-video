@@ -1,0 +1,59 @@
+# Default configuration for Wan 2.1 quantization stacking
+
+model:
+  id: "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+  cache_dir: null  # defaults to HuggingFace cache (~/.cache/huggingface)
+
+generation:
+  height: 480
+  width: 832
+  num_frames: 81         # ~5 seconds at 16fps
+  fps: 16
+  num_inference_steps: 30
+  guidance_scale: 5.0
+  seed: 42
+  negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画面变形，畸形，毁容，形态畸形，手部畸形，腿部畸形，额外的手指，融合的手指，静止画面，动态不足，"
+
+quantization:
+  # Strategy: "progressive" (best quality), "average", "weighted", "residual"
+  stacking_strategy: progressive
+  num_passes: 3
+  inter_pass_noise_level: 0.05  # noise added between progressive passes
+
+  # Per-pass quant config (varies quant type for diversity)
+  pass_configs:
+    - quant_type: "4bit"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      bnb_4bit_compute_dtype: "bfloat16"
+    - quant_type: "4bit"
+      bnb_4bit_quant_type: "fp4"
+      bnb_4bit_use_double_quant: false
+      bnb_4bit_compute_dtype: "bfloat16"
+    - quant_type: "4bit"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      bnb_4bit_compute_dtype: "bfloat16"
+
+memory:
+  enable_model_cpu_offload: true
+  enable_sequential_cpu_offload: false  # slower but uses less VRAM
+  enable_vae_slicing: true
+  enable_vae_tiling: false
+  text_encoder_precision: "bfloat16"
+  vae_precision: "bfloat16"
+
+long_video:
+  segment_frames: 81     # frames per segment
+  overlap_frames: 8      # blend overlap between segments
+  max_duration_seconds: 180  # 3 minutes
+
+agent:
+  host: "0.0.0.0"
+  port: 8400
+  output_dir: "outputs"
+
+benchmark:
+  output_dir: "benchmark_outputs"
+  num_frames: 49       # shorter for speed
+  num_inference_steps: 20
