@@ -498,11 +498,15 @@ def create_app() -> FastAPI:
             logger.warning("Stripe webhook error: %s", e)
             raise HTTPException(status_code=400, detail=str(e))
         if action and action["action"] == "grant_credits":
-            new_balance = add_credits(action["api_key"], action["credits_cents"])
-            logger.info(
-                "Granted %d cents to %s…  new balance=%d",
-                action["credits_cents"], action["api_key"][:8], new_balance,
-            )
+            from ..billing.store import claim_stripe_event
+            if claim_stripe_event(action["event_id"]):
+                new_balance = add_credits(action["api_key"], action["credits_cents"])
+                logger.info(
+                    "Granted %d cents to %s…  new balance=%d",
+                    action["credits_cents"], action["api_key"][:8], new_balance,
+                )
+            else:
+                logger.info("Duplicate Stripe event %s — skipped", action["event_id"])
         return {"received": True}
 
     @app.get("/billing/packages")

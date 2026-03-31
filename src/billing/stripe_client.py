@@ -122,6 +122,7 @@ def handle_webhook(payload: bytes, sig_header: str) -> Optional[dict]:
             meta = session.get("metadata", {})
             return {
                 "action": "grant_credits",
+                "event_id": event["id"],
                 "api_key": meta.get("api_key", ""),
                 "credits_cents": int(meta.get("credits_cents", 0)),
                 "package_id": meta.get("package_id", ""),
