@@ -47,7 +47,7 @@ class QuantStackEngine:
 
     def __init__(self, stack_config: Optional[StackConfig] = None):
         self.config = stack_config or StackConfig()
-        self._pass_latents: List[torch.Tensor] = []
+        self._pass_latents: List[Any] = []
         self._pass_times: List[float] = []
 
     def run_stacked(

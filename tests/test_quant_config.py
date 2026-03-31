@@ -24,6 +24,16 @@ def test_stack_config_defaults():
     assert cfg.stacking_strategy == "progressive"
 
 
+def test_quant_stack_engine_instantiation():
+    """QuantStackEngine should instantiate without GPU (lazy torch import)."""
+    from src.quant.config import StackConfig
+    from src.quant.engine import QuantStackEngine
+    engine = QuantStackEngine(StackConfig(num_passes=2))
+    assert engine.config.num_passes == 2
+    assert engine._pass_latents == []
+    assert engine._pass_times == []
+
+
 def test_stack_config_pass_diversity():
     """Verify that default pass configs vary quant type."""
     from src.quant.config import StackConfig
