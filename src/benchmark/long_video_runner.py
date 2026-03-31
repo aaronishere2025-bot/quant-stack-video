@@ -61,20 +61,35 @@ class LongVideoBenchmarkConfig:
     # Which configs to run
     configs: List[Dict[str, Any]] = field(default_factory=lambda: [
         {
+            "label": "bf16-baseline",
+            "use_stacking": False,
+            "quant_type": "none",
+        },
+        {
             "label": "sequential-4bit",
             "use_stacking": False,
+            "quant_type": "4bit",
+        },
+        {
+            "label": "bf16-4pass-progressive",
+            "use_stacking": True,
+            "num_passes": 4,
+            "strategy": "progressive",
+            "quant_type": "none",
         },
         {
             "label": "layered-3x4bit-progressive",
             "use_stacking": True,
             "num_passes": 3,
             "strategy": "progressive",
+            "quant_type": "4bit",
         },
         {
             "label": "layered-2x4bit-average",
             "use_stacking": True,
             "num_passes": 2,
             "strategy": "average",
+            "quant_type": "4bit",
         },
     ])
 
@@ -181,6 +196,7 @@ class LongVideoBenchmarkRunner:
         use_stacking = cfg.get("use_stacking", False)
         num_passes = cfg.get("num_passes", 3)
         strategy = cfg.get("strategy", "progressive")
+        quant_type = cfg.get("quant_type", "4bit")
 
         logger.info(f"\n  Config: {label} | stacking={use_stacking}")
 
@@ -217,6 +233,7 @@ class LongVideoBenchmarkRunner:
                     use_stacking=use_stacking,
                     num_passes=num_passes,
                     strategy=strategy,
+                    quant_type=quant_type,
                 )
             except Exception as exc:
                 logger.error(f"    Segment {seg_idx+1} FAILED: {exc}")
@@ -315,6 +332,7 @@ class LongVideoBenchmarkRunner:
         use_stacking: bool,
         num_passes: int,
         strategy: str,
+        quant_type: str = "4bit",
     ) -> np.ndarray:
         """Generate one video segment; returns (T, H, W, C) float32 [0, 1]."""
         import torch
@@ -331,7 +349,19 @@ class LongVideoBenchmarkRunner:
         )
 
         if use_stacking:
-            stack_cfg = StackConfig(num_passes=num_passes, stacking_strategy=strategy)
+            if quant_type == "none":
+                # bf16 stacking: each pass runs at full precision
+                pass_cfgs = [
+                    QuantConfig(quant_type="none", load_in_4bit=False, load_in_8bit=False)
+                    for _ in range(num_passes)
+                ]
+                stack_cfg = StackConfig(
+                    num_passes=num_passes,
+                    stacking_strategy=strategy,
+                    pass_configs=pass_cfgs,
+                )
+            else:
+                stack_cfg = StackConfig(num_passes=num_passes, stacking_strategy=strategy)
             engine = QuantStackEngine(stack_cfg)
             result = engine.run_stacked(
                 pipeline_factory=factory,
@@ -340,8 +370,12 @@ class LongVideoBenchmarkRunner:
             )
             return result["frames"]
         else:
-            qcfg = QuantConfig(load_in_4bit=True)
-            from ..quant.engine import QuantStackEngine
+            if quant_type == "none":
+                qcfg = QuantConfig(quant_type="none", load_in_4bit=False, load_in_8bit=False)
+            elif quant_type == "8bit":
+                qcfg = QuantConfig(quant_type="8bit", load_in_4bit=False, load_in_8bit=True)
+            else:
+                qcfg = QuantConfig(load_in_4bit=True)
             pipe = factory(qcfg)
             gen = torch.Generator(device="cuda")
             gen.manual_seed(seg_seed)

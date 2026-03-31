@@ -83,20 +83,32 @@ def main():
 
     from src.benchmark.long_video_runner import LongVideoBenchmarkConfig, LongVideoBenchmarkRunner
 
-    configs = [{"label": "sequential-4bit", "use_stacking": False}]
+    configs = [
+        {"label": "bf16-baseline", "use_stacking": False, "quant_type": "none"},
+        {"label": "sequential-4bit", "use_stacking": False, "quant_type": "4bit"},
+    ]
     if not args.no_stack:
         configs += [
+            {
+                "label": "bf16-4pass-progressive",
+                "use_stacking": True,
+                "num_passes": 4,
+                "strategy": "progressive",
+                "quant_type": "none",
+            },
             {
                 "label": "layered-3x4bit-progressive",
                 "use_stacking": True,
                 "num_passes": 3,
                 "strategy": "progressive",
+                "quant_type": "4bit",
             },
             {
                 "label": "layered-2x4bit-average",
                 "use_stacking": True,
                 "num_passes": 2,
                 "strategy": "average",
+                "quant_type": "4bit",
             },
         ]
 
