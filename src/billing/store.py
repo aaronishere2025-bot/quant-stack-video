@@ -56,6 +56,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             is_trial    INTEGER NOT NULL DEFAULT 0,
             created_at  REAL NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS stripe_events (
+            event_id    TEXT PRIMARY KEY,
+            processed_at REAL NOT NULL
+        );
     """)
     conn.commit()
 
@@ -75,6 +80,25 @@ def get_balance(api_key: str) -> int:
             "SELECT balance_cents FROM credits WHERE api_key = ?", (api_key,)
         ).fetchone()
         return row["balance_cents"] if row else 0
+
+
+def claim_stripe_event(event_id: str) -> bool:
+    """
+    Record a Stripe event ID to prevent duplicate processing.
+    Returns True if the event is new (should be processed).
+    Returns False if already seen (duplicate — skip).
+    """
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO stripe_events (event_id, processed_at) VALUES (?, ?)",
+                (event_id, time.time()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 def add_credits(api_key: str, cents: int) -> int:
