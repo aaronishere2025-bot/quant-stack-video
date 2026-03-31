@@ -54,22 +54,39 @@ def _load_api_keys() -> set[str]:
     return {k.strip() for k in raw.split(",") if k.strip()}
 
 
+def _is_valid_key(api_key: str) -> bool:
+    """Return True if the key is valid (env-var list OR DB-provisioned)."""
+    if api_key in _load_api_keys():
+        return True
+    try:
+        from ..billing.store import validate_db_key
+        return validate_db_key(api_key)
+    except Exception:
+        return False
+
+
 def require_api_key(
     request: Request,
     api_key: Optional[str] = Security(_API_KEY_HEADER),
 ) -> None:
     """FastAPI dependency — raises 401 when a key is required but missing/invalid."""
     keys = _load_api_keys()
-    if not keys:
-        return  # open mode: no keys configured, trust the firewall
     # Localhost callers (Unity job worker) bypass key check
     client_host = request.client.host if request.client else ""
     if client_host in ("127.0.0.1", "::1"):
         return
-    if not api_key or api_key not in keys:
+    if not api_key:
+        if not keys:
+            return  # open mode: no keys configured, trust the firewall
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-API-Key header",
+            detail="Missing X-API-Key header",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+    if not _is_valid_key(api_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid X-API-Key",
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
@@ -503,6 +520,154 @@ def create_app() -> FastAPI:
             }
             for pkg_id, pkg in CREDIT_PACKAGES.items()
         ]
+
+    # -----------------------------------------------------------------------
+    # Free trial sign-up
+    # -----------------------------------------------------------------------
+
+    class TrialSignupRequest(BaseModel):
+        label: str = Field(default="", max_length=128, description="Optional label (name / email / project)")
+
+    @app.post("/trial/signup")
+    @limiter.limit("10/minute")
+    def trial_signup(request: Request, body: TrialSignupRequest = TrialSignupRequest()):
+        """
+        Create a free trial API key with 30 seconds of video credit.
+        No auth required — open to anyone.  Rate-limited to 10/minute per IP.
+        """
+        from ..billing.store import create_trial_key, FREE_TRIAL_SECONDS, CENTS_PER_SECOND
+        result = create_trial_key(label=body.label)
+        return {
+            "api_key": result["api_key"],
+            "free_seconds": FREE_TRIAL_SECONDS,
+            "balance_cents": result["balance_cents"],
+            "message": (
+                f"Welcome! You have {FREE_TRIAL_SECONDS} seconds of free video generation. "
+                "Use the X-API-Key header on all requests. "
+                "When credits run out, visit /billing/checkout to purchase more."
+            ),
+            "quick_start": {
+                "generate_5s": {
+                    "method": "POST",
+                    "url": "/generate/single",
+                    "headers": {"X-API-Key": result["api_key"]},
+                    "body": {
+                        "prompt": "a serene mountain lake at sunset",
+                        "num_frames": 81,
+                        "quant_type": "4bit",
+                    },
+                }
+            },
+        }
+
+    @app.get("/onboarding", response_class=None)
+    @limiter.limit("60/minute")
+    def onboarding(request: Request):
+        """HTML getting-started guide — no auth required."""
+        from fastapi.responses import HTMLResponse
+        html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quant-Stack Video API — Get Started</title>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.6;color:#1a1a1a}
+    h1{font-size:1.8rem;margin-bottom:.25rem}
+    .tagline{color:#555;margin-top:0;margin-bottom:2rem}
+    h2{margin-top:2rem;border-bottom:2px solid #eee;padding-bottom:.3rem}
+    pre{background:#1e1e1e;color:#d4d4d4;padding:1rem;border-radius:6px;overflow-x:auto;font-size:.85rem}
+    code{background:#f0f0f0;padding:2px 5px;border-radius:3px;font-size:.9em}
+    .highlight{background:#fff3cd;border-left:4px solid #ffc107;padding:.75rem 1rem;border-radius:0 6px 6px 0;margin:1.5rem 0}
+    .btn{display:inline-block;background:#0070f3;color:#fff;padding:.55rem 1.25rem;border-radius:6px;text-decoration:none;font-weight:600;border:none;cursor:pointer;font-size:.95rem}
+    .btn:hover{background:#0060d3}
+    table{width:100%;border-collapse:collapse;margin:1rem 0}
+    th,td{text-align:left;padding:.5rem .75rem;border-bottom:1px solid #eee}
+    th{background:#f8f8f8;font-weight:600}
+    footer{margin-top:3rem;color:#888;font-size:.85rem}
+  </style>
+</head>
+<body>
+  <h1>Quant-Stack Video API</h1>
+  <p class="tagline">AI video generation — 5-second clips from text prompts, $0.10/second.</p>
+
+  <div class="highlight">
+    <strong>Free trial:</strong> Get 30 seconds of video generation at no cost — no credit card required.
+  </div>
+
+  <h2>1. Claim your free trial key</h2>
+  <pre>curl -s -X POST http://YOUR_HOST:8400/trial/signup \\
+  -H "Content-Type: application/json" \\
+  -d '{"label": "your-name-or-email"}'</pre>
+  <p>You'll receive an <code>api_key</code> string. Keep it safe.</p>
+
+  <h2>2. Generate your first video (5 seconds @ 16 fps)</h2>
+  <pre>curl -s -X POST http://YOUR_HOST:8400/generate/single \\
+  -H "X-API-Key: qsv_trial_XXXXX" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "prompt": "a majestic dragon soaring over a neon city at night",
+    "num_frames": 81,
+    "quant_type": "4bit",
+    "output_dir": "/tmp/qsv_output"
+  }'</pre>
+  <p>Returns a <code>task_id</code>. Poll for completion:</p>
+  <pre>curl http://YOUR_HOST:8400/tasks/TASK_ID</pre>
+
+  <h2>3. Check your balance</h2>
+  <pre>curl http://YOUR_HOST:8400/billing/balance \\
+  -H "X-API-Key: qsv_trial_XXXXX"</pre>
+
+  <h2>API Endpoints</h2>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td>/trial/signup</td><td>Get a free trial key (30s credit)</td></tr>
+      <tr><td>POST</td><td>/generate/single</td><td>Single-pass 4-bit generation</td></tr>
+      <tr><td>POST</td><td>/generate/stacked</td><td>Multi-pass stacked (higher quality)</td></tr>
+      <tr><td>POST</td><td>/generate/long</td><td>Long video up to 3 minutes</td></tr>
+      <tr><td>GET</td><td>/tasks/{task_id}</td><td>Poll job status</td></tr>
+      <tr><td>GET</td><td>/billing/balance</td><td>Check credit balance</td></tr>
+      <tr><td>POST</td><td>/billing/checkout</td><td>Buy more credits (Stripe)</td></tr>
+      <tr><td>GET</td><td>/billing/packages</td><td>Available credit packages</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Pricing</h2>
+  <table>
+    <thead><tr><th>Package</th><th>Price</th><th>Video</th><th>Cost/second</th></tr></thead>
+    <tbody>
+      <tr><td>Free trial</td><td>$0</td><td>30 s</td><td>—</td></tr>
+      <tr><td>Starter</td><td>$5</td><td>50 s</td><td>$0.10</td></tr>
+      <tr><td>Standard</td><td>$10</td><td>100 s</td><td>$0.10</td></tr>
+      <tr><td>Pro</td><td>$25</td><td>250 s</td><td>$0.10</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Quick-start Python snippet</h2>
+  <pre>import requests, time
+
+API = "http://YOUR_HOST:8400"
+KEY = "qsv_trial_XXXXX"
+
+resp = requests.post(f"{API}/generate/single",
+    headers={"X-API-Key": KEY},
+    json={"prompt": "neon sunset over a cyberpunk city",
+          "num_frames": 81, "quant_type": "4bit"})
+task_id = resp.json()["task_id"]
+
+while True:
+    s = requests.get(f"{API}/tasks/{task_id}").json()
+    print(s["status"], s.get("progress",""))
+    if s["status"] in ("done","error"): break
+    time.sleep(3)
+
+print("Output:", s.get("result",{}).get("output_path"))</pre>
+
+  <footer>Quant-Stack Video &mdash; Powered by Wan 2.1 + 4-bit quantization on RTX 4070</footer>
+</body>
+</html>"""
+        return HTMLResponse(content=html, status_code=200)
 
     @app.get("/dashboard", response_class=None)
     @limiter.limit("60/minute")

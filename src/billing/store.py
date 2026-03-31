@@ -6,10 +6,12 @@ Credits are denominated in cents (integer). $0.10/second of video = 10 cents/sec
 Tables:
   credits  — api_key -> balance_cents
   usage    — per-generation usage log
+  api_keys — provisioned keys with metadata (trial, label, created_at)
 
 Thread-safe via sqlite3's check_same_thread=False + a module-level lock.
 """
 
+import secrets
 import sqlite3
 import threading
 import time
@@ -45,6 +47,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             task_id     TEXT,
             seconds     REAL NOT NULL,
             cost_cents  INTEGER NOT NULL,
+            created_at  REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS api_keys (
+            api_key     TEXT PRIMARY KEY,
+            label       TEXT NOT NULL DEFAULT '',
+            is_trial    INTEGER NOT NULL DEFAULT 0,
             created_at  REAL NOT NULL
         );
     """)
@@ -134,5 +143,62 @@ def get_usage(api_key: str, limit: int = 50) -> List[dict]:
             ORDER BY created_at DESC LIMIT ?
             """,
             (api_key, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# API key provisioning
+# ---------------------------------------------------------------------------
+
+FREE_TRIAL_SECONDS = 30
+FREE_TRIAL_CENTS = FREE_TRIAL_SECONDS * CENTS_PER_SECOND  # 300 cents
+
+
+def create_trial_key(label: str = "") -> dict:
+    """
+    Generate a new trial API key with FREE_TRIAL_CREDITS free credits.
+    Returns {"api_key": str, "balance_cents": int, "trial_seconds": int}.
+    """
+    key = "qsv_trial_" + secrets.token_urlsafe(24)
+    now = time.time()
+    with _lock:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT INTO api_keys (api_key, label, is_trial, created_at) VALUES (?, ?, 1, ?)",
+            (key, label[:128], now),
+        )
+        conn.execute(
+            "INSERT INTO credits (api_key, balance_cents, updated_at) VALUES (?, ?, ?)",
+            (key, FREE_TRIAL_CENTS, now),
+        )
+        conn.commit()
+    return {"api_key": key, "balance_cents": FREE_TRIAL_CENTS, "trial_seconds": FREE_TRIAL_SECONDS}
+
+
+def validate_db_key(api_key: str) -> bool:
+    """Return True if this key exists in the api_keys table."""
+    with _lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT 1 FROM api_keys WHERE api_key = ?", (api_key,)
+        ).fetchone()
+        return row is not None
+
+
+def list_trial_keys(limit: int = 100) -> List[dict]:
+    """Return recent trial keys with their balances (admin use)."""
+    with _lock:
+        conn = _get_conn()
+        rows = conn.execute(
+            """
+            SELECT k.api_key, k.label, k.created_at,
+                   COALESCE(c.balance_cents, 0) AS balance_cents
+            FROM api_keys k
+            LEFT JOIN credits c ON c.api_key = k.api_key
+            WHERE k.is_trial = 1
+            ORDER BY k.created_at DESC LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
