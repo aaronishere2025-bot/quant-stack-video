@@ -275,6 +275,18 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Remove stale route-limit registrations from any previous create_app() call.
+    # The limiter is a module-level singleton; calling create_app() more than once
+    # (e.g. in tests) would otherwise append duplicate Limit objects, halving the
+    # effective rate limit on every subsequent call.
+    _mod_prefix = f"{__name__}."
+    for _key in list(limiter._route_limits.keys()):
+        if _key.startswith(_mod_prefix):
+            del limiter._route_limits[_key]
+    for _key in list(limiter._dynamic_route_limits.keys()):
+        if _key.startswith(_mod_prefix):
+            del limiter._dynamic_route_limits[_key]
+
     app = FastAPI(
         title="Quant-Stack Video API",
         description=(
