@@ -144,11 +144,15 @@ class WanPipelineFactory:
                 cache_dir=self.cache_dir,
             )
 
-        # Memory optimization
-        if self.enable_vae_slicing:
+        # Memory optimization (guard against API differences across diffusers versions)
+        if self.enable_vae_slicing and hasattr(pipe, "enable_vae_slicing"):
             pipe.enable_vae_slicing()
-        if self.enable_vae_tiling:
+        elif self.enable_vae_slicing and hasattr(pipe.vae, "enable_slicing"):
+            pipe.vae.enable_slicing()
+        if self.enable_vae_tiling and hasattr(pipe, "enable_vae_tiling"):
             pipe.enable_vae_tiling()
+        elif self.enable_vae_tiling and hasattr(pipe.vae, "enable_tiling"):
+            pipe.vae.enable_tiling()
 
         # CPU offloading strategy
         if self.enable_sequential_cpu_offload:
