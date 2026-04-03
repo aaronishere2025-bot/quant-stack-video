@@ -60,6 +60,7 @@ class SegmentDirective:
     is_scene_change: bool = False        # Whether this segment starts a new scene
     character_refs: List[str] = field(default_factory=list)  # Paths to EchoShot reference images
     segment_idx: int = 0
+    arm_ids: Dict[str, int] = field(default_factory=dict)  # Bandit arm IDs for reward feedback
 
 
 @dataclass
@@ -115,14 +116,17 @@ class LLMDirector:
     that suffixes the base prompt with state-derived context.
     """
 
-    def __init__(self, base_prompt: str, config: Optional[DirectorConfig] = None):
+    def __init__(self, base_prompt: str, config: Optional[DirectorConfig] = None,
+                 engine: str = "ltx") -> None:
         """
         Args:
-            base_prompt: The initial/anchor prompt for the video (e.g. "A mountain hike at dawn")
+            base_prompt: The initial/anchor prompt for the video
             config:      Director configuration. If None, uses defaults (LLM disabled).
+            engine:      Video engine — "ltx" or "wan". Passed to prompt bandit.
         """
         self.base_prompt = base_prompt
         self.config = config or DirectorConfig()
+        self.engine = engine
         self._state = NarrativeState(
             scene_number=0,
             current_location=self._extract_location_hint(base_prompt),
@@ -130,6 +134,9 @@ class LLMDirector:
             time_of_day="day",
         )
         self._segment_history: List[SegmentDirective] = []
+
+        from .prompt_bandit import prompt_bandit
+        self._bandit = prompt_bandit
 
     @property
     def current_state(self) -> NarrativeState:
@@ -161,12 +168,16 @@ class LLMDirector:
             SegmentDirective with prompt and updated state
         """
         if segment_idx == 0:
-            # First segment always uses the base prompt directly
+            enhanced_prompt, arm_ids = self._bandit.build_enhanced_prompt(
+                self.base_prompt + self.config.fallback_prompt_suffix,
+                engine=self.engine,
+            )
             directive = SegmentDirective(
-                prompt=self.base_prompt + self.config.fallback_prompt_suffix,
+                prompt=enhanced_prompt,
                 state=self._state,
                 is_scene_change=False,
                 segment_idx=0,
+                arm_ids=arm_ids,
             )
             self._segment_history.append(directive)
             return directive
@@ -244,12 +255,17 @@ class LLMDirector:
         )
         self._state = new_state
 
+        enhanced_prompt, arm_ids = self._bandit.build_enhanced_prompt(
+            parsed["prompt"], engine=self.engine
+        )
+
         return SegmentDirective(
-            prompt=parsed["prompt"],
+            prompt=enhanced_prompt,
             negative_prompt=parsed.get("negative_prompt"),
             state=new_state,
             is_scene_change=is_scene_change,
             segment_idx=segment_idx,
+            arm_ids=arm_ids,
         )
 
     def _fallback_directive(self, segment_idx: int) -> SegmentDirective:
@@ -278,11 +294,14 @@ class LLMDirector:
 
         prompt = ", ".join(context_parts) + self.config.fallback_prompt_suffix
 
+        enhanced_prompt, arm_ids = self._bandit.build_enhanced_prompt(prompt, engine=self.engine)
+
         return SegmentDirective(
-            prompt=prompt,
+            prompt=enhanced_prompt,
             state=self._state,
             is_scene_change=False,
             segment_idx=segment_idx,
+            arm_ids=arm_ids,
         )
 
     def get_history_summary(self) -> List[Dict[str, Any]]:
@@ -295,3 +314,10 @@ class LLMDirector:
             }
             for d in self._segment_history
         ]
+
+    def record_segment_quality(self, arm_ids: Dict[str, int], score: float) -> None:
+        """Feed quality score back to the bandit for arm reward updates."""
+        try:
+            self._bandit.update_reward(arm_ids, score, engine=self.engine)
+        except Exception as exc:
+            logger.warning("Bandit reward update failed: %s", exc)
