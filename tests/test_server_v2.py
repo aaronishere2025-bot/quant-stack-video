@@ -219,3 +219,166 @@ class TestInfinitePipelineRunner:
         assert d0.segment_idx == 0
         assert d1.segment_idx == 1
         assert director.segment_count == 2
+
+
+# ---------------------------------------------------------------------------
+# POST /generate/composite endpoint
+# ---------------------------------------------------------------------------
+
+class TestGenerateCompositeEndpoint:
+    def _write_rgba_npy(self, path, shape=(1, 4, 8, 32, 32)):
+        """Write a float32 RGBA numpy file at path."""
+        import numpy as np
+        arr = np.random.rand(*shape).astype("float32")
+        np.save(str(path), arr)
+
+    def test_returns_task_id(self, tmp_path):
+        """Endpoint should accept 3 layer paths and return a task_id immediately."""
+        pytest.importorskip("fastapi")
+        paths = []
+        for i in range(3):
+            p = tmp_path / f"layer{i}.npy"
+            self._write_rgba_npy(p)
+            paths.append(str(p))
+
+        with _make_client() as client:
+            resp = client.post("/generate/composite", json={"layer_paths": paths})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "task_id" in body
+        assert body["status"] == "queued"
+
+    def test_wrong_layer_count_rejected(self, tmp_path):
+        """Exactly 3 layer paths required — fewer should be rejected with 422."""
+        pytest.importorskip("fastapi")
+        p = tmp_path / "layer0.npy"
+        self._write_rgba_npy(p)
+
+        with _make_client() as client:
+            resp = client.post("/generate/composite", json={"layer_paths": [str(p), str(p)]})
+        assert resp.status_code == 422
+
+    def test_missing_layer_paths_rejected(self):
+        """layer_paths is required — omitting it should return 422."""
+        pytest.importorskip("fastapi")
+        with _make_client() as client:
+            resp = client.post("/generate/composite", json={})
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_composite_runner_produces_rgb(self, tmp_path):
+        """_run_composite loads 3 RGBA .npy files and writes an RGB .npy output."""
+        import numpy as np
+        from src.agent.server import _registry, _run_composite, CompositeRequest
+
+        shape = (1, 4, 8, 32, 32)
+        paths = []
+        for i in range(3):
+            p = tmp_path / f"layer{i}.npy"
+            arr = np.random.rand(*shape).astype("float32")
+            np.save(str(p), arr)
+            paths.append(str(p))
+
+        out_path = str(tmp_path / "out.npy")
+        task_id = "test-comp-001"
+        _registry.create(task_id)
+
+        req = CompositeRequest(layer_paths=paths, output_path=out_path)
+        await _run_composite(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "done"
+        result = state["result"]
+        assert result["output_path"] == out_path
+        assert result["shape"][1] == 3  # RGB — alpha channel dropped
+
+        rgb = np.load(out_path)
+        assert rgb.shape == (1, 3, 8, 32, 32)
+
+    @pytest.mark.asyncio
+    async def test_composite_runner_error_on_bad_path(self, tmp_path):
+        """_run_composite should record error status if a layer file doesn't exist."""
+        from src.agent.server import _registry, _run_composite, CompositeRequest
+
+        task_id = "test-comp-002"
+        _registry.create(task_id)
+        req = CompositeRequest(layer_paths=["/no/such/bg.npy", "/no/such/mg.npy", "/no/such/fg.npy"])
+        await _run_composite(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "error"
+        assert state.get("error")
+
+
+# ---------------------------------------------------------------------------
+# GET /generate/{task_id}/segment/{n}
+# ---------------------------------------------------------------------------
+
+class TestGetSegmentEndpoint:
+    def _inject_fake_wan(self, tmp_path):
+        import sys, types
+        fake_gen = MagicMock(return_value=str(tmp_path / "seg_0000.mp4"))
+        fake_module = types.ModuleType("src.wan.generate")
+        fake_module.generate_video = fake_gen
+        fake_module.generate_video_stacked = MagicMock()
+        fake_module.generate_long_video = MagicMock()
+        sys.modules.setdefault("src.wan", types.ModuleType("src.wan"))
+        sys.modules["src.wan.generate"] = fake_module
+
+    @pytest.mark.asyncio
+    async def test_segment_returns_metadata(self, tmp_path):
+        """After a successful infinite run, segment 0 metadata is accessible."""
+        from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
+
+        self._inject_fake_wan(tmp_path)
+        task_id = "test-seg-001"
+        _registry.create(task_id)
+
+        req = InfiniteRequest(
+            prompt="Autumn forest",
+            max_segments=1,
+            use_rgba_layers=False,
+            output_dir=str(tmp_path),
+        )
+        (tmp_path / "infinite" / task_id[:8]).mkdir(parents=True, exist_ok=True)
+        await _run_infinite_gen(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "done"
+
+        # Retrieve segment 0 via the HTTP endpoint
+        with _make_client() as client:
+            resp = client.get(f"/generate/{task_id}/segment/0")
+        # File won't exist on disk (fake wan doesn't write it), so expect JSON metadata
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["segment_idx"] == 0
+        assert "output_path" in body
+
+    @pytest.mark.asyncio
+    async def test_segment_404_for_missing_task(self):
+        """Unknown task_id should return 404."""
+        with _make_client() as client:
+            resp = client.get("/generate/does-not-exist/segment/0")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_segment_404_for_out_of_range(self, tmp_path):
+        """Segment index beyond the task result should return 404."""
+        from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
+
+        self._inject_fake_wan(tmp_path)
+        task_id = "test-seg-002"
+        _registry.create(task_id)
+        req = InfiniteRequest(
+            prompt="City lights",
+            max_segments=1,
+            use_rgba_layers=False,
+            output_dir=str(tmp_path),
+        )
+        (tmp_path / "infinite" / task_id[:8]).mkdir(parents=True, exist_ok=True)
+        await _run_infinite_gen(task_id, req)
+
+        with _make_client() as client:
+            resp = client.get(f"/generate/{task_id}/segment/99")
+        assert resp.status_code == 404

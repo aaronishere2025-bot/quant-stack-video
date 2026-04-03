@@ -235,6 +235,18 @@ class InfiniteRequest(GenerateRequest):
     )
 
 
+class CompositeRequest(BaseModel):
+    layer_paths: List[str] = Field(
+        ...,
+        min_length=3,
+        max_length=3,
+        description="Paths to 3 RGBA layer files [background, midground, foreground] (.npy, float32, [B,4,F,H,W])",
+    )
+    output_path: Optional[str] = Field(default=None, description="Where to write the composited .npy file; auto-derived if omitted")
+    smooth_alpha: bool = Field(default=True, description="Apply temporal alpha smoothing before compositing")
+    alpha_kernel_size: int = Field(default=3, ge=1, description="Temporal smoothing kernel size (must be odd)")
+
+
 class BenchmarkRequest(BaseModel):
     prompts: List[str] = Field(default_factory=lambda: [
         "A serene mountain lake at sunrise, mist rising from the water"
@@ -327,6 +339,27 @@ def create_app() -> FastAPI:
         if task is None:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         return task
+
+    @app.get("/generate/{task_id}/segment/{n}")
+    @limiter.limit("60/minute")
+    def get_segment(request: Request, task_id: str, n: int, _auth=Depends(require_api_key)):
+        """Return metadata (and file path) for segment n of an infinite generation task."""
+        from fastapi.responses import FileResponse
+
+        task = _registry.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        result = task.get("result")
+        if result is None:
+            raise HTTPException(status_code=404, detail="Task has no result yet — still running?")
+        segments = result.get("segments", [])
+        if n < 0 or n >= len(segments):
+            raise HTTPException(status_code=404, detail=f"Segment {n} not found (task has {len(segments)} segments)")
+        seg = segments[n]
+        output_path = seg.get("output_path", "")
+        if output_path and Path(output_path).exists():
+            return FileResponse(output_path, media_type="video/mp4", filename=Path(output_path).name)
+        return seg
 
     @app.get("/stats/vram")
     @limiter.limit("60/minute")
@@ -427,6 +460,32 @@ def create_app() -> FastAPI:
 
         async def job():
             await _run_infinite_gen(task_id, req)
+
+        await _enqueue(task_id, job)
+        return {"task_id": task_id, "status": "queued", "queue_position": _job_queue.qsize() - 1}
+
+    @app.post("/generate/composite")
+    @limiter.limit("5/minute")
+    async def generate_composite(
+        request: Request,
+        req: CompositeRequest,
+        _auth=Depends(require_api_key),
+    ):
+        """
+        Composite 3 RGBA layer files into a single RGB video tensor.
+
+        Accepts paths to .npy files of shape [B, 4, F, H, W] (float32, values in [0, 1]).
+        Runs AlphaCompositor with Porter-Duff "over" blending (background → midground → foreground).
+        Writes the RGB result as a .npy file and returns the output path.
+
+        Returns task_id for async polling via GET /tasks/{task_id}.
+        """
+        task_id = str(uuid.uuid4())
+        _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
+
+        async def job():
+            await _run_composite(task_id, req)
 
         await _enqueue(task_id, job)
         return {"task_id": task_id, "status": "queued", "queue_position": _job_queue.qsize() - 1}
@@ -1101,6 +1160,54 @@ async def _run_auto_optimize(
 
     except Exception as e:
         logger.exception("Auto-optimize task %s failed", task_id)
+        _registry.update(task_id, status="error", error=str(e))
+
+
+async def _run_composite(task_id: str, req: "CompositeRequest"):
+    """
+    Background job for POST /generate/composite.
+
+    Loads 3 RGBA layer tensors from .npy files, runs AlphaCompositor, and
+    writes the composited RGB tensor as a .npy file.
+
+    Expected input shape per file: [B, 4, F, H, W], float32, values in [0, 1].
+    Output shape: [B, 3, F, H, W], float32.
+    """
+    import numpy as np
+
+    _registry.update(task_id, progress="Loading RGBA layer files...")
+    try:
+        import torch
+        from ..rgba.compositor import AlphaCompositor, LayerSet
+
+        layers = []
+        for path in req.layer_paths:
+            arr = np.load(path).astype("float32")
+            layers.append(torch.from_numpy(arr))
+
+        layer_set = LayerSet(background=layers[0], midground=layers[1], foreground=layers[2])
+        compositor = AlphaCompositor(
+            smooth_alpha_frames=req.smooth_alpha,
+            alpha_kernel_size=req.alpha_kernel_size,
+        )
+        _registry.update(task_id, progress="Running alpha compositor...")
+        rgb = compositor.composite(layer_set)
+
+        if req.output_path:
+            out_path = req.output_path
+        else:
+            out_path = str(Path(req.layer_paths[0]).parent / f"composite_{task_id[:8]}.npy")
+
+        np.save(out_path, rgb.numpy())
+        logger.info("Composite task %s done → %s %s", task_id[:8], out_path, list(rgb.shape))
+
+        _registry.update(task_id, status="done", result={
+            "output_path": out_path,
+            "shape": list(rgb.shape),
+        })
+
+    except Exception as e:
+        logger.exception("Composite task %s failed", task_id)
         _registry.update(task_id, status="error", error=str(e))
 
 
