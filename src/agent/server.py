@@ -494,6 +494,24 @@ def create_app() -> FastAPI:
     # Heavy ops endpoints  (2/min)
     # -----------------------------------------------------------------------
 
+    class VideoEvalRequest(BaseModel):
+        prompt: str
+        video_path: Optional[str] = None
+        video_description: Optional[str] = None
+
+    @app.post("/evaluate/video")
+    @limiter.limit("2/minute")
+    async def evaluate_video(request: Request, req: VideoEvalRequest):
+        """Score an AI-generated clip with the local VLM. Returns quality dimensions,
+        best-matching content domain, corrective directives for the next generation
+        prompt, and flagged visual issues. No auth required — localhost-internal."""
+        from .video_quality import evaluate
+        return await evaluate(
+            prompt=req.prompt,
+            video_path=req.video_path,
+            video_description=req.video_description,
+        )
+
     @app.post("/benchmark")
     @limiter.limit("2/minute")
     async def run_benchmark(
@@ -1242,12 +1260,15 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
         vace_cfg = VACEConfig(overlap_frames=req.vace_overlap_frames, segment_frames=req.segment_frames)
         vace = VACEExtension(vace_cfg)
         svi = SVIRecycler(SVIConfig(ema_decay=req.svi_ema_decay))
-        director = LLMDirector(req.prompt)
+        engine = "ltx" if ("ltx" in req.model_id.lower() or "lightricks" in req.model_id.lower()) else "wan"
+        director = LLMDirector(req.prompt, engine=engine)
 
         layer_prompts = req.layer_prompts or [req.prompt, req.prompt, req.prompt]
 
         segment_results = []
         segment_idx = 0
+        prev_frame_path = None   # EchoShot: last frame conditions the next segment
+        last_arm_ids: dict = {}  # Bandit: arm IDs for reward feedback
 
         while req.max_segments == 0 or segment_idx < req.max_segments:
             # Check for task cancellation
@@ -1264,6 +1285,7 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
             # --- Step 1: LLM director generates segment prompt ---
             directive = director.next_segment(segment_idx)
             seg_prompt = directive.prompt
+            last_arm_ids = directive.arm_ids
             logger.info("[infinite %s] seg=%d prompt=%s", task_id[:8], segment_idx, seg_prompt[:60])
 
             seg_path = str(output_dir / f"seg_{segment_idx:04d}.mp4")
@@ -1344,7 +1366,12 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                     quant_type="4bit",
                     cache_dir=req.cache_dir,
                     fps=req.fps,
+                    engine=engine,
+                    image_path=prev_frame_path,
                 )
+                # EchoShot: update prev_frame_path for next segment
+                candidate = seg_path.replace(".mp4", "_last_frame.png")
+                prev_frame_path = candidate if Path(candidate).exists() else None
 
             # --- Step 3: VACE temporal handoff ---
             # In production, latents come directly from the DiT without VAE decode.
@@ -1367,6 +1394,12 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                 svi.record_segment_errors(pred, target)
             except Exception as svi_err:
                 logger.debug("[infinite %s] SVI record skipped: %s", task_id[:8], svi_err)
+
+            # --- Step 5: Bandit reward feedback ---
+            try:
+                director.record_segment_quality(last_arm_ids, score=7.0)
+            except Exception as bandit_err:
+                logger.debug("[infinite %s] Bandit reward skipped: %s", task_id[:8], bandit_err)
 
             # Drift score from VACE overlap similarity (synthetic for now)
             drift_score = 0.0

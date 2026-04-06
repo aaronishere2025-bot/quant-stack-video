@@ -13,7 +13,6 @@ import numpy as np
 
 from ..quant.config import QuantConfig, StackConfig
 from ..quant.engine import QuantStackEngine
-from .pipeline_factory import WanPipelineFactory
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +31,8 @@ def generate_video(
     quant_type: str = "4bit",
     cache_dir: Optional[str] = None,
     fps: int = 16,
+    engine: str = "wan",
+    image_path: Optional[str] = None,
 ) -> str:
     """
     Generate a video using a single Wan 2.1 pass.
@@ -50,9 +51,31 @@ def generate_video(
         cache_dir: HuggingFace model cache directory
         fps: Output video frame rate
 
+        engine: "wan" (default) or "ltx"
+        image_path: Path to conditioning image for EchoShot frame chaining (LTX i2v only)
+
     Returns:
-        Path to saved video file
+        Path to saved .mp4 file. A sibling _last_frame.png is also written.
     """
+    if engine == "ltx":
+        return _generate_video_ltx(
+            prompt=prompt,
+            output_path=output_path,
+            model_id=model_id,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            cache_dir=cache_dir,
+            fps=fps,
+            image_path=image_path,
+        )
+
+    # --- WAN path ---
+    from .pipeline_factory import WanPipelineFactory
     factory = WanPipelineFactory(
         model_id=model_id,
         cache_dir=cache_dir,
@@ -85,6 +108,7 @@ def generate_video(
 
     frames = output.frames[0]  # (T, H, W, C)
     saved = _save_video(frames, output_path, fps=fps)
+    _save_last_frame(frames, output_path)
     return saved
 
 
@@ -120,6 +144,7 @@ def generate_video_stacked(
     Returns:
         dict with "output_path", "pass_times", "total_time", "strategy"
     """
+    from .pipeline_factory import WanPipelineFactory
     factory = WanPipelineFactory(
         model_id=model_id,
         cache_dir=cache_dir,
@@ -193,6 +218,7 @@ def generate_long_video(
     logger.info(f"Long video generation: {duration_seconds}s → {num_segments} segments "
                 f"({segment_frames} frames each, {overlap_frames} overlap)")
 
+    from .pipeline_factory import WanPipelineFactory
     factory = WanPipelineFactory(
         model_id=model_id,
         cache_dir=cache_dir,
@@ -309,3 +335,73 @@ def _save_video(frames_np: np.ndarray, output_path: str, fps: int = 16) -> str:
 
     logger.info(f"Saved: {output_path} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
     return str(output_path.absolute())
+
+
+def _save_last_frame(frames_np: np.ndarray, output_path: str) -> str:
+    """
+    Save the last frame of a video as PNG for EchoShot frame chaining.
+
+    Args:
+        frames_np: (T, H, W, C) float32 array in [0, 1]
+        output_path: Path to the output .mp4 (PNG written alongside it)
+
+    Returns:
+        Absolute path to the saved PNG
+    """
+    from PIL import Image
+    last_frame = (np.clip(frames_np[-1], 0.0, 1.0) * 255).astype(np.uint8)
+    last_frame_path = output_path.replace(".mp4", "_last_frame.png")
+    Image.fromarray(last_frame).save(last_frame_path)
+    logger.debug("Saved last frame: %s", last_frame_path)
+    return last_frame_path
+
+
+def _generate_video_ltx(
+    prompt: str,
+    output_path: str,
+    model_id: str,
+    negative_prompt: str,
+    height: int,
+    width: int,
+    num_frames: int,
+    num_inference_steps: int,
+    guidance_scale: float,
+    seed: int,
+    cache_dir: Optional[str],
+    fps: int,
+    image_path: Optional[str],
+) -> str:
+    """LTX-Video generation path (t2v or i2v based on image_path)."""
+    import torch
+    from PIL import Image as PILImage
+    from .ltx_pipeline_factory import LTXPipelineFactory
+
+    use_i2v = image_path is not None
+    factory = LTXPipelineFactory(
+        model_id=model_id,
+        cache_dir=cache_dir,
+        image_conditioning=use_i2v,
+    )
+    pipe = factory.build()
+
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+
+    call_kwargs: dict = dict(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        generator=gen,
+        output_type="np",
+    )
+    if use_i2v:
+        call_kwargs["image"] = PILImage.open(image_path).convert("RGB")
+
+    output = pipe(**call_kwargs)
+    frames = output.frames[0]  # (T, H, W, C)
+    saved = _save_video(frames, output_path, fps=fps)
+    _save_last_frame(frames, output_path)
+    return saved

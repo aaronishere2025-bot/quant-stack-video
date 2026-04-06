@@ -11,8 +11,6 @@ Same CPU-offload and VAE-slicing guards as WanPipelineFactory.
 import logging
 from typing import Optional
 
-import torch
-
 logger = logging.getLogger(__name__)
 
 LTX_MODEL_ID = "Lightricks/LTX-Video"
@@ -47,6 +45,7 @@ class LTXPipelineFactory:
 
     def build(self):
         """Load and return the LTX pipeline (t2v or i2v based on image_conditioning)."""
+        import torch
         if self.image_conditioning:
             from diffusers import LTXImageToVideoPipeline
             pipeline_cls = LTXImageToVideoPipeline
