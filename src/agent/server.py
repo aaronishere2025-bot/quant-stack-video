@@ -1395,9 +1395,26 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
             except Exception as svi_err:
                 logger.debug("[infinite %s] SVI record skipped: %s", task_id[:8], svi_err)
 
-            # --- Step 5: Bandit reward feedback ---
+            # --- Step 5: Bandit reward feedback (real VLM eval) ---
             try:
-                director.record_segment_quality(last_arm_ids, score=7.0)
+                from .video_quality import evaluate as vlm_evaluate
+                eval_result = await vlm_evaluate(prompt=seg_prompt, video_path=seg_path)
+                if eval_result.get("success"):
+                    quality_score = eval_result["score"]
+                    logger.info(
+                        "[infinite %s] seg=%d VLM score=%.1f (match=%.1f motion=%.1f coherence=%.1f)",
+                        task_id[:8], segment_idx, quality_score,
+                        eval_result.get("prompt_match", 0),
+                        eval_result.get("motion_quality", 0),
+                        eval_result.get("visual_coherence", 0),
+                    )
+                else:
+                    quality_score = 7.0
+                    logger.debug(
+                        "[infinite %s] seg=%d VLM eval unavailable (%s), default score=7.0",
+                        task_id[:8], segment_idx, eval_result.get("error", "unknown"),
+                    )
+                director.record_segment_quality(last_arm_ids, score=quality_score)
             except Exception as bandit_err:
                 logger.debug("[infinite %s] Bandit reward skipped: %s", task_id[:8], bandit_err)
 

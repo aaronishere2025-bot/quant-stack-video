@@ -10,7 +10,7 @@ Infinite layered video generation engine. Core thesis: 3 quantized RGBA layers +
 
 - **GPU**: RTX 4070, 12 GB VRAM
 - All VRAM budgets assume 12 GB. The GPU is shared — check `nvidia-smi` before long runs.
-- Environment variable for long runs: `PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256`
+- Environment variable for long runs: `PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256` (note: `_CUDA_` not `_HIP_` — HIP is the AMD ROCm allocator; RTX 4070 is NVIDIA, so the `_HIP_` form is silently a no-op)
 
 ## Python Environment
 
@@ -46,10 +46,11 @@ Compositing order: background → midground → foreground.
 - Prevents autoregressive drift over infinite iterations
 - SVI-Shot variant for single-scene continuous generation
 
-### Phase 5 — LLM Continuity Agent
-- "Virtual director" generates evolving prompts per segment
-- Tracks narrative state across segments
-- EchoShot for character consistency
+### Phase 5 — LLM Continuity Agent + Bandit + EchoShot
+- `LLMDirector` generates evolving prompts per segment via `src/llm/director.py`
+- `WanPromptBandit` (Thompson sampling) selects prompt modifiers per-engine — state persists to `data/bandit/*.json`
+- EchoShot: last frame of each segment saved as `_last_frame.png` and fed as `image_path` to `LTXImageToVideoPipeline` for i2v continuity
+- Supports two engines: `wan` (default) and `ltx` — auto-detected from `model_id` in `/generate/infinite`
 
 ## Critical Constraints
 
@@ -86,23 +87,39 @@ src/
   quant/          # Quantization stacking engine
     config.py     # QuantConfig, StackConfig
     engine.py     # QuantStackEngine (4 strategies)
-  wan/            # Wan 2.1 integration
-    pipeline_factory.py  # WanPipelineFactory
-    generate.py          # generate_video, generate_video_stacked, generate_long_video
+  wan/            # Wan 2.1 + LTX-Video integration
+    __init__.py          # intentionally empty (lazy imports — avoids torch init on NTFS)
+    pipeline_factory.py  # WanPipelineFactory (WAN 2.1)
+    ltx_pipeline_factory.py  # LTXPipelineFactory (t2v + i2v EchoShot)
+    generate.py          # generate_video (engine=wan|ltx, image_path for i2v)
+  llm/            # LLM director + prompt bandit
+    director.py          # LLMDirector — narrative state, next_segment(), record_segment_quality()
+    prompt_bandit.py     # WanPromptBandit — Thompson sampling, per-engine arms, JSON persistence
   benchmark/      # Quality metrics and comparison runner
     metrics.py    # PSNR, SSIM, LPIPS, temporal consistency
     runner.py     # BenchmarkRunner
   agent/          # Autonomous optimization agent
-    server.py     # FastAPI on :8400
+    server.py          # FastAPI on :8400
+    video_quality.py   # Clip evaluator — Gemini 2.5 Flash (full MP4 via File API); requires GEMINI_API_KEY in workspace .env
 configs/
   default.yaml    # Default generation and stacking config
+data/
+  bandit/         # Bandit state JSON (wan-prompt-bandit.json, ltx-prompt-bandit.json)
 scripts/
   generate.py     # CLI entry point
   start_agent.sh  # Start :8400 agent
 docs/
-  research-gemini-layered-infinite-video.md  # v2 architecture research
-tests/
+  research-gemini-layered-infinite-video.md
+tests/            # 26 tests, all no-GPU (monkeypatched)
   test_quant_config.py
+  test_prompt_bandit.py
+  test_ltx_pipeline_factory.py
+  test_director_bandit.py
+  test_generate_ltx.py
+  test_infinite_chaining.py
+  test_agent_server.py
+  test_billing.py
+  test_v2_components.py
 ```
 
 ## Running Things
@@ -130,17 +147,28 @@ uvicorn src.agent.server:app --host 0.0.0.0 --port 8400
 
 Unity queries this to decide local vs Kling generation.
 
+> **Port note**: `:8400` is also claimed by `workspace-stackeroo-api` in the workspace `COMPOSE_FILE` chain. If you start both via `./workspace.sh up` while this agent is also running directly, the second binder will fail. If you don't run stackeroo locally, ignore.
+>
+> **Port mismatch with Unity caller**: `projects/unity-repo/server/services/local-video-service.ts` hardcodes `WAN_API_URL = http://localhost:8190` (not `:8400`). Either Unity is silently calling nothing, or there's a separate service on `:8190` not documented here. Worth investigating before relying on the local video pipeline from Unity.
+
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Status check |
+| `GET /health` | Status check (returns `engine: wan\|ltx`) |
 | `POST /generate/single` | Single-pass generation |
 | `POST /generate/stacked` | Multi-pass stacked |
 | `POST /generate/long` | Long video (≤3 min) |
+| `POST /generate/infinite` | Infinite video loop: bandit prompts + EchoShot frame chaining |
 | `POST /benchmark` | Run quality comparison |
 | `POST /optimize/auto` | Auto-optimize pass count |
 | `GET /stats/vram` | Live VRAM stats |
 
 **If you change the API contract, notify Unity Engineer (agent: 986a9984).**
+
+### Infinite Gen Notes
+
+`/generate/infinite` threads `prev_frame_path` through the segment loop for EchoShot.
+Engine (`wan` vs `ltx`) is auto-detected from `model_id` (LTX if `"ltx"` or `"lightricks"` in name).
+Bandit reward is recorded after each segment via `director.record_segment_quality()`.
 
 ## Benchmarking
 

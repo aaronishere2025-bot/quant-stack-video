@@ -77,6 +77,22 @@ def reset_rate_limiter():
     limiter._storage.reset()
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _restore_src_wan_modules():
+    """Remove fake src.wan modules from sys.modules after this test file.
+
+    _inject_fake_wan() replaces sys.modules['src.wan.generate'] with a
+    MagicMock-based module to avoid importing torch.  Without this cleanup,
+    the fake persists across test files and breaks downstream tests
+    (test_generate_ltx, test_ltx_pipeline_factory) that import from the
+    real src.wan.generate — they get '_save_last_frame not found' errors
+    because the fake lacks those symbols.
+    """
+    yield
+    for mod_name in ("src.wan.generate", "src.wan"):
+        sys.modules.pop(mod_name, None)
+
+
 # ---------------------------------------------------------------------------
 # Unit tests — require_api_key dependency
 # ---------------------------------------------------------------------------

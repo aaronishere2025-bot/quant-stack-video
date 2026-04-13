@@ -52,6 +52,10 @@ def main():
     mode_group.add_argument("--long", action="store_true", help="Generate long video")
     mode_group.add_argument("--benchmark", action="store_true", help="Run benchmark comparison")
 
+    # Engine
+    parser.add_argument("--engine", choices=["wan", "ltx"], default="wan",
+                        help="Video engine: wan (Wan 2.1) or ltx (LTX-Video)")
+
     # Single-pass quant type
     parser.add_argument("--quant", choices=["4bit", "8bit", "none"], default="4bit")
 
@@ -144,7 +148,8 @@ def main():
 
     else:
         from src.wan.generate import generate_video
-        print(f"Generating with single {args.quant} pass...")
+        engine_label = args.engine.upper()
+        print(f"Generating with {engine_label}" + (f" single {args.quant} pass..." if args.engine == "wan" else "..."))
         saved = generate_video(
             prompt=args.prompt,
             output_path=args.output,
@@ -159,6 +164,7 @@ def main():
             quant_type=args.quant,
             cache_dir=args.cache_dir,
             fps=args.fps,
+            engine=args.engine,
         )
         print(f"\nDone! Saved to: {saved}")
 

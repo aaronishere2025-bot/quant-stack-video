@@ -15,12 +15,17 @@ generation:
   negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画面变形，畸形，毁容，形态畸形，手部畸形，腿部畸形，额外的手指，融合的手指，静止画面，动态不足，"
 
 quantization:
-  # Strategy: "progressive" (best quality), "average", "weighted", "residual"
-  stacking_strategy: progressive
-  num_passes: 3
+  # Winning strategy from AGE-462 benchmark (2026-04-13):
+  #   4bit-single: 9.5 min/video, 11.6 GB VRAM peak — fits RTX 4070 12GB ✓
+  #   8bit-single: 14.6 min/video, 13.0 GB VRAM peak — exceeds 12GB budget ✗
+  #   Stacked configs: did not complete (OOM after 8bit left 1.47 GB unfreed)
+  # Primary mode: single 4-bit (NF4) — fastest + fits VRAM budget
+  # Stacking strategy kept for quality work with sequential_cpu_offload
+  stacking_strategy: average
+  num_passes: 2
   inter_pass_noise_level: 0.05  # noise added between progressive passes
 
-  # Per-pass quant config (varies quant type for diversity)
+  # Per-pass quant config (4bit NF4 for both passes when stacking)
   pass_configs:
     - quant_type: "4bit"
       bnb_4bit_quant_type: "nf4"
@@ -29,10 +34,6 @@ quantization:
     - quant_type: "4bit"
       bnb_4bit_quant_type: "fp4"
       bnb_4bit_use_double_quant: false
-      bnb_4bit_compute_dtype: "bfloat16"
-    - quant_type: "4bit"
-      bnb_4bit_quant_type: "nf4"
-      bnb_4bit_use_double_quant: true
       bnb_4bit_compute_dtype: "bfloat16"
 
 memory:

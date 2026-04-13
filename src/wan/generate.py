@@ -356,6 +356,13 @@ def _save_last_frame(frames_np: np.ndarray, output_path: str) -> str:
     return last_frame_path
 
 
+# The default negative prompt on generate_video() is Wan 2.1's Chinese string.
+# When the caller routes to LTX without overriding it, the Chinese tokens are
+# meaningless to LTX's English T5 encoder. Detect that case and substitute the
+# LTX-appropriate negative prompt.
+_WAN_DEFAULT_NEGATIVE_PROMPT_SENTINEL = "色调艳丽"  # first few chars of the Wan default
+
+
 def _generate_video_ltx(
     prompt: str,
     output_path: str,
@@ -374,15 +381,22 @@ def _generate_video_ltx(
     """LTX-Video generation path (t2v or i2v based on image_path)."""
     import torch
     from PIL import Image as PILImage
-    from .ltx_pipeline_factory import LTXPipelineFactory
+    from .ltx_pipeline_factory import (
+        get_cached_pipeline,
+        LTX_DEFAULT_NEGATIVE_PROMPT,
+    )
+
+    # Swap Wan-default negative prompt for LTX-appropriate English one.
+    if negative_prompt and _WAN_DEFAULT_NEGATIVE_PROMPT_SENTINEL in negative_prompt:
+        logger.debug("LTX: replacing Wan Chinese negative prompt with LTX default")
+        negative_prompt = LTX_DEFAULT_NEGATIVE_PROMPT
 
     use_i2v = image_path is not None
-    factory = LTXPipelineFactory(
+    pipe = get_cached_pipeline(
         model_id=model_id,
         cache_dir=cache_dir,
         image_conditioning=use_i2v,
     )
-    pipe = factory.build()
 
     gen = torch.Generator(device="cuda").manual_seed(seed)
 
