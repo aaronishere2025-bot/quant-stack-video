@@ -691,7 +691,7 @@ def create_app() -> FastAPI:
             },
         }
 
-    @app.get("/onboarding", response_class=None)
+    @app.get("/onboarding")
     @limiter.limit("60/minute")
     def onboarding(request: Request):
         """HTML getting-started guide — no auth required."""
@@ -800,7 +800,7 @@ print("Output:", s.get("result",{}).get("output_path"))</pre>
 </html>"""
         return HTMLResponse(content=html, status_code=200)
 
-    @app.get("/dashboard", response_class=None)
+    @app.get("/dashboard")
     @limiter.limit("60/minute")
     def dashboard(request: Request, _auth=Depends(require_api_key)):
         """Simple HTML dashboard showing credit balance and usage history."""
