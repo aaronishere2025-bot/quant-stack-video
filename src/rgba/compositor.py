@@ -337,3 +337,38 @@ def save_rgb_tensor_as_mp4(
 
     logger.debug("Saved composited RGB tensor to %s (%d frames @ %d fps)", output_path, len(frames_uint8), fps)
     return output_path
+
+
+def save_last_frame(
+    rgb: "torch.Tensor",
+    output_path: str,
+    batch_idx: int = 0,
+) -> str:
+    """
+    Save the last frame of an RGB video tensor as a PNG image.
+
+    Used for EchoShot frame chaining — the final frame of each segment
+    conditions the first frame of the next.
+
+    Args:
+        rgb:         [B, 3, F, H, W] float32 tensor, values in [0, 1].
+        output_path: Destination .png path.
+        batch_idx:   Which batch element to use (default 0).
+
+    Returns:
+        output_path (unchanged).
+    """
+    import numpy as np
+    from PIL import Image
+
+    if rgb.shape[1] != 3:
+        raise ValueError(f"Expected 3-channel RGB tensor, got shape {rgb.shape}")
+
+    # [B, 3, F, H, W] → last frame → [H, W, 3] uint8
+    last = rgb[batch_idx, :, -1, :, :]          # [3, H, W]
+    last_hw3 = last.permute(1, 2, 0)            # [H, W, 3]
+    last_uint8 = (last_hw3.clamp(0.0, 1.0) * 255.0).byte().numpy()
+
+    Image.fromarray(last_uint8, mode="RGB").save(output_path)
+    logger.debug("Saved last frame to %s", output_path)
+    return output_path

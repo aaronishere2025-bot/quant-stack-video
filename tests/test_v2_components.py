@@ -260,6 +260,44 @@ class TestSaveRgbTensorAsMp4:
             save_rgb_tensor_as_mp4(rgba, str(tmp_path / "bad.mp4"))
 
 
+class TestSaveLastFrame:
+    """Tests for save_last_frame (EchoShot PNG extraction)."""
+
+    def test_saves_png_and_file_exists(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_last_frame
+
+        rgb = torch.rand(1, 3, 8, 32, 32)
+        out = str(tmp_path / "last_frame.png")
+        result = save_last_frame(rgb, out)
+        assert result == out
+        assert (tmp_path / "last_frame.png").exists()
+        assert (tmp_path / "last_frame.png").stat().st_size > 0
+
+    def test_saves_last_frame_not_first(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_last_frame
+        from PIL import Image
+        import numpy as np
+
+        # Frame 0 = black, Frame 1 = white
+        rgb = torch.zeros(1, 3, 2, 32, 32)
+        rgb[:, :, 1, :, :] = 1.0  # last frame is white
+        out = str(tmp_path / "last_frame.png")
+        save_last_frame(rgb, out)
+
+        img = np.array(Image.open(out))
+        assert img.mean() > 200, "Should be white (last frame)"
+
+    def test_wrong_channels_raises(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_last_frame
+
+        rgba = torch.rand(1, 4, 4, 32, 32)
+        with pytest.raises(ValueError, match="3-channel"):
+            save_last_frame(rgba, str(tmp_path / "bad.png"))
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: VACE Extension
 # ---------------------------------------------------------------------------
