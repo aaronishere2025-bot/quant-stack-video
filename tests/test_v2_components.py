@@ -137,6 +137,95 @@ class TestSmoothAlpha:
             smooth_alpha(torch.rand(1, 4, 8, 8, 8), kernel_size=4)
 
 
+class TestRgbToRgbaLuminance:
+    """Tests for the luminance-based alpha stand-in."""
+
+    def _rgb(self, val: float = 0.5, B=1, F=4, H=8, W=8) -> "torch.Tensor":
+        t = torch.full((B, 3, F, H, W), val)
+        return t
+
+    def test_output_shape(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        rgb = self._rgb()
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="background")
+        assert rgba.shape == (1, 4, 4, 8, 8)
+
+    def test_background_alpha_is_one(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        rgb = self._rgb(0.3)
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="background")
+        assert torch.allclose(rgba[:, 3:4], torch.ones_like(rgba[:, 3:4]))
+
+    def test_midground_alpha_is_max_rgb(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        # Uniform grey: max(R,G,B) == the grey value itself
+        rgb = self._rgb(0.6)
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="midground")
+        assert torch.allclose(rgba[:, 3:4], torch.full_like(rgba[:, 3:4], 0.6), atol=1e-5)
+
+    def test_foreground_alpha_is_luma(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        # Pure white: luma = 0.299 + 0.587 + 0.114 = 1.0
+        rgb = torch.ones(1, 3, 4, 8, 8)
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="foreground")
+        assert torch.allclose(rgba[:, 3:4], torch.ones_like(rgba[:, 3:4]), atol=1e-4)
+
+    def test_alpha_scale_applies(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        rgb = self._rgb(1.0)
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="background", alpha_scale=0.5)
+        assert torch.allclose(rgba[:, 3:4], torch.full_like(rgba[:, 3:4], 0.5), atol=1e-5)
+
+    def test_rgb_channels_unchanged(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        rgb = torch.rand(1, 3, 4, 8, 8)
+        rgba = rgb_to_rgba_luminance(rgb, layer_role="midground")
+        assert torch.allclose(rgba[:, :3], rgb)
+
+    def test_wrong_channels_raises(self):
+        from src.rgba.compositor import rgb_to_rgba_luminance
+
+        with pytest.raises(ValueError, match="3-channel"):
+            rgb_to_rgba_luminance(torch.zeros(1, 4, 4, 8, 8))
+
+
+class TestLoadRgbaFromVideo:
+    """Integration test for load_rgba_from_video using a synthetic MP4."""
+
+    def test_load_rgba_background(self, tmp_path):
+        import numpy as np
+        import imageio
+        from src.rgba.compositor import load_rgba_from_video
+
+        # Write a 4-frame 32x32 red video (dimensions divisible by 16 for FFMPEG compat)
+        frames = np.zeros((4, 32, 32, 3), dtype=np.uint8)
+        frames[:, :, :, 0] = 200  # red channel
+        video_path = str(tmp_path / "test.mp4")
+        writer = imageio.get_writer(video_path, fps=8, format="FFMPEG")
+        for frame in frames:
+            writer.append_data(frame)
+        writer.close()
+
+        rgba = load_rgba_from_video(video_path, layer_role="background", max_frames=4)
+        assert rgba.shape[0] == 1        # batch=1
+        assert rgba.shape[1] == 4        # RGBA channels
+        assert rgba.shape[2] == 4        # 4 frames
+        # Background alpha should be 1.0
+        assert rgba[:, 3:4].min().item() > 0.99
+
+    def test_load_rgba_missing_file_raises(self):
+        from src.rgba.compositor import load_rgba_from_video
+
+        with pytest.raises(FileNotFoundError):
+            load_rgba_from_video("/nonexistent/path/video.mp4")
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: VACE Extension
 # ---------------------------------------------------------------------------

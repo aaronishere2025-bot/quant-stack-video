@@ -11,7 +11,8 @@ Tensor convention: [B, 4, F, H, W], float32, values in [0, 1]
 
 import logging
 from dataclasses import dataclass
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -172,3 +173,124 @@ class AlphaCompositor:
             base = composite_over(top=layer, bottom=base)
 
         return base[:, :3]
+
+
+# ---------------------------------------------------------------------------
+# Video loading helpers (stand-in until Wan-Alpha ships in diffusers)
+# ---------------------------------------------------------------------------
+
+def load_rgb_from_video(video_path: str, max_frames: Optional[int] = None) -> "torch.Tensor":
+    """
+    Load an MP4 file into a float32 RGB tensor.
+
+    Uses imageio with FFMPEG (always available) to read the video.
+
+    Args:
+        video_path:  Path to an .mp4 file.
+        max_frames:  If set, truncate to this many frames.
+
+    Returns:
+        [1, 3, F, H, W] float32 tensor, values in [0, 1].
+
+    Raises:
+        FileNotFoundError: if video_path does not exist.
+        RuntimeError:      if imageio cannot decode the file.
+    """
+    import torch
+    import numpy as np
+    import imageio
+
+    if not Path(video_path).exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    reader = imageio.get_reader(video_path, format="FFMPEG")
+    try:
+        raw_frames: list = []
+        for i, frame in enumerate(reader):
+            if max_frames is not None and i >= max_frames:
+                break
+            raw_frames.append(frame)
+    finally:
+        reader.close()
+
+    if not raw_frames:
+        raise RuntimeError(f"No frames decoded from {video_path}")
+
+    frames = np.stack(raw_frames)  # [F, H, W, 3] uint8
+
+    # [F, H, W, 3] uint8 → [1, 3, F, H, W] float32 in [0, 1]
+    t = torch.from_numpy(frames.astype(np.float32) / 255.0)
+    t = t.permute(3, 0, 1, 2).unsqueeze(0)  # [1, 3, F, H, W]
+    return t
+
+
+def rgb_to_rgba_luminance(
+    rgb: "torch.Tensor",
+    layer_role: str = "midground",
+    alpha_scale: float = 1.0,
+) -> "torch.Tensor":
+    """
+    Add a luminance-derived alpha channel to an RGB video tensor.
+
+    This is a stand-in compositing technique used when true RGBA generation
+    (Wan-Alpha) is not yet available.  Different roles use different alpha
+    strategies so the composite has visible depth:
+
+      background  — fully opaque (alpha = 1.0)
+      midground   — screen-matte: alpha = max(R, G, B)  (light areas visible)
+      foreground  — luma-matte:   alpha = Y = 0.299R + 0.587G + 0.114B
+
+    Args:
+        rgb:         [B, 3, F, H, W] float32 tensor, values in [0, 1].
+        layer_role:  "background", "midground", or "foreground".
+        alpha_scale: Scalar multiplier applied to the computed alpha (clipped
+                     to [0, 1]).  Use < 1.0 to make a layer semi-transparent.
+
+    Returns:
+        [B, 4, F, H, W] float32 RGBA tensor.
+    """
+    import torch
+
+    if rgb.shape[1] != 3:
+        raise ValueError(f"Expected 3-channel RGB tensor, got shape {rgb.shape}")
+
+    role = layer_role.lower()
+    if role == "background":
+        alpha = torch.ones_like(rgb[:, :1])
+    elif role == "midground":
+        # Screen matte: bright pixels (clouds, light sources) are more opaque
+        alpha = rgb.max(dim=1, keepdim=True).values
+    else:  # foreground
+        # Luma matte: weighted luminance — good for subjects against dark BG
+        r, g, b = rgb[:, 0:1], rgb[:, 1:2], rgb[:, 2:3]
+        alpha = 0.299 * r + 0.587 * g + 0.114 * b
+
+    if alpha_scale != 1.0:
+        alpha = (alpha * alpha_scale).clamp(0.0, 1.0)
+
+    return torch.cat([rgb, alpha], dim=1)  # [B, 4, F, H, W]
+
+
+def load_rgba_from_video(
+    video_path: str,
+    layer_role: str = "midground",
+    max_frames: Optional[int] = None,
+    alpha_scale: float = 1.0,
+) -> "torch.Tensor":
+    """
+    Load an MP4 and return an RGBA tensor with a luminance-derived alpha.
+
+    Convenience wrapper around :func:`load_rgb_from_video` +
+    :func:`rgb_to_rgba_luminance`.
+
+    Args:
+        video_path:  Path to an .mp4 file.
+        layer_role:  "background", "midground", or "foreground".
+        max_frames:  Truncate to this many frames if set.
+        alpha_scale: Scale factor for the computed alpha.
+
+    Returns:
+        [1, 4, F, H, W] float32 RGBA tensor.
+    """
+    rgb = load_rgb_from_video(video_path, max_frames=max_frames)
+    return rgb_to_rgba_luminance(rgb, layer_role=layer_role, alpha_scale=alpha_scale)

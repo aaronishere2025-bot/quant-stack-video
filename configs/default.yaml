@@ -15,13 +15,26 @@ generation:
   negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画面变形，畸形，毁容，形态畸形，手部畸形，腿部畸形，额外的手指，融合的手指，静止画面，动态不足，"
 
 quantization:
-  # Winning strategy from AGE-462 benchmark (2026-04-13):
-  #   4bit-single: 9.5 min/video, 11.6 GB VRAM peak — fits RTX 4070 12GB ✓
-  #   8bit-single: 14.6 min/video, 13.0 GB VRAM peak — exceeds 12GB budget ✗
-  #   Stacked configs: did not complete (OOM after 8bit left 1.47 GB unfreed)
+  # Benchmark history (Wan2.1-T2V-1.3B, 832x480, 81 frames, 30 steps, RTX 4070 12GB):
+  #
+  # AGE-462 (2026-04-13):
+  #   4bit-single: 9.5 min/video, 11.6 GB VRAM peak — fits budget ✓
+  #   8bit-single: 14.6 min/video, 13.0 GB VRAM peak — exceeds budget ✗
+  #   Stacked configs: OOM (no cpu_offload)
+  #
+  # AGE-476 (2026-04-13) — 1-pass vs 3-pass progressive stacking:
+  #   single 4-bit NF4:      395.5s,  11.60 GB VRAM peak
+  #   3-pass progressive:   2415.8s,  11.86 GB VRAM peak  (6.1x slower)
+  #   PSNR:  13.76 dB  — outputs diverge significantly (not a refinement)
+  #   SSIM:  0.5857    — moderate structural similarity
+  #   LPIPS: 0.6760    — high perceptual distance
+  #   Temporal Δ: -0.022 — stacked is smoother but content diverges from 1-pass
+  #   VERDICT: stacking does NOT improve quality; 6.1x cost with content drift.
+  #            Mark as RESEARCH-ONLY. Default is single 4-bit NF4.
+  #
   # Primary mode: single 4-bit (NF4) — fastest + fits VRAM budget
-  # Stacking strategy kept for quality work with sequential_cpu_offload
-  stacking_strategy: average
+  # Stacking: research-only — see AGE-476 for findings
+  stacking_strategy: average  # research-only; not used in default single-pass mode
   num_passes: 2
   inter_pass_noise_level: 0.05  # noise added between progressive passes
 

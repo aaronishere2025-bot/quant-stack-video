@@ -1295,7 +1295,7 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                 # Generate 3 RGBA layers and composite
                 try:
                     from ..wan.generate import generate_video
-                    import torch
+                    from ..rgba.compositor import load_rgba_from_video
 
                     rgba_layers = []
                     layer_names = ["background", "midground", "foreground"]
@@ -1316,12 +1316,18 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                             cache_dir=req.cache_dir,
                             fps=req.fps,
                         )
-                        # NOTE: real RGBA layer loading would read a 4-channel tensor from disk.
-                        # Wan-Alpha is not yet in diffusers; we generate RGB and synthesise an alpha
-                        # by using the luminance as a soft matte (stand-in until Wan-Alpha ships).
-                        import numpy as np
-                        placeholder = torch.rand(1, 4, req.segment_frames, req.height // 8, req.width // 8)
-                        rgba_layers.append(placeholder)
+                        # Wan-Alpha is not yet in diffusers — use luminance-based alpha
+                        # as a stand-in matte until true RGBA generation is available.
+                        rgba = load_rgba_from_video(
+                            layer_path,
+                            layer_role=layer_names[li],
+                            max_frames=req.segment_frames,
+                        )
+                        rgba_layers.append(rgba)
+                        logger.info(
+                            "[infinite %s] seg=%d layer=%s RGBA shape=%s",
+                            task_id[:8], segment_idx, layer_names[li], list(rgba.shape),
+                        )
 
                     layers = LayerSet(
                         background=rgba_layers[0],
