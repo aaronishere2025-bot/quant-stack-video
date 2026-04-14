@@ -294,3 +294,46 @@ def load_rgba_from_video(
     """
     rgb = load_rgb_from_video(video_path, max_frames=max_frames)
     return rgb_to_rgba_luminance(rgb, layer_role=layer_role, alpha_scale=alpha_scale)
+
+
+def save_rgb_tensor_as_mp4(
+    rgb: "torch.Tensor",
+    output_path: str,
+    fps: int = 16,
+    batch_idx: int = 0,
+) -> str:
+    """
+    Encode an RGB video tensor to an MP4 file.
+
+    Args:
+        rgb:         [B, 3, F, H, W] float32 tensor, values in [0, 1].
+        output_path: Destination .mp4 path (parent directory must exist).
+        fps:         Output frame rate.
+        batch_idx:   Which batch element to encode (default 0).
+
+    Returns:
+        output_path (unchanged).
+
+    Raises:
+        ValueError: if rgb does not have 3 channels.
+    """
+    import numpy as np
+    import imageio
+
+    if rgb.shape[1] != 3:
+        raise ValueError(f"Expected 3-channel RGB tensor, got shape {rgb.shape}")
+
+    # [B, 3, F, H, W] → [F, H, W, 3] uint8
+    frames_tensor = rgb[batch_idx]                          # [3, F, H, W]
+    frames_tensor = frames_tensor.permute(1, 2, 3, 0)      # [F, H, W, 3]
+    frames_uint8 = (frames_tensor.clamp(0.0, 1.0) * 255.0).byte().numpy()  # [F, H, W, 3]
+
+    writer = imageio.get_writer(output_path, fps=fps, format="FFMPEG")
+    try:
+        for frame in frames_uint8:
+            writer.append_data(frame)
+    finally:
+        writer.close()
+
+    logger.debug("Saved composited RGB tensor to %s (%d frames @ %d fps)", output_path, len(frames_uint8), fps)
+    return output_path

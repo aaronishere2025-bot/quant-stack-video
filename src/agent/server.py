@@ -1336,8 +1336,9 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                     )
                     rgb = compositor.composite(layers)
                     logger.info("[infinite %s] seg=%d composited RGBA layers → RGB %s", task_id[:8], segment_idx, list(rgb.shape))
-                    # For now seg_path is written by generate_video (layer 0 path used as proxy)
-                    # In production this would encode `rgb` tensor to mp4.
+                    from ..rgba.compositor import save_rgb_tensor_as_mp4
+                    save_rgb_tensor_as_mp4(rgb, seg_path, fps=req.fps)
+                    logger.info("[infinite %s] seg=%d composite saved to %s", task_id[:8], segment_idx, seg_path)
 
                 except Exception as layer_err:
                     logger.warning("[infinite %s] RGBA layer generation failed (%s); falling back to single pass", task_id[:8], layer_err)

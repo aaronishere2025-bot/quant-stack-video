@@ -226,6 +226,40 @@ class TestLoadRgbaFromVideo:
             load_rgba_from_video("/nonexistent/path/video.mp4")
 
 
+class TestSaveRgbTensorAsMp4:
+    """Tests for save_rgb_tensor_as_mp4 round-trip."""
+
+    def test_saves_mp4_and_file_exists(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_rgb_tensor_as_mp4
+
+        # 32x32 so FFMPEG doesn't need to resize
+        rgb = torch.rand(1, 3, 4, 32, 32)
+        out = str(tmp_path / "out.mp4")
+        result = save_rgb_tensor_as_mp4(rgb, out, fps=8)
+        assert result == out
+        assert (tmp_path / "out.mp4").exists()
+        assert (tmp_path / "out.mp4").stat().st_size > 0
+
+    def test_roundtrip_frame_count(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_rgb_tensor_as_mp4, load_rgb_from_video
+
+        rgb = torch.rand(1, 3, 8, 32, 32)
+        out = str(tmp_path / "roundtrip.mp4")
+        save_rgb_tensor_as_mp4(rgb, out, fps=8)
+        loaded = load_rgb_from_video(out, max_frames=8)
+        assert loaded.shape[2] == 8
+
+    def test_wrong_channels_raises(self, tmp_path):
+        import torch
+        from src.rgba.compositor import save_rgb_tensor_as_mp4
+
+        rgba = torch.rand(1, 4, 4, 32, 32)
+        with pytest.raises(ValueError, match="3-channel"):
+            save_rgb_tensor_as_mp4(rgba, str(tmp_path / "bad.mp4"))
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: VACE Extension
 # ---------------------------------------------------------------------------
