@@ -339,6 +339,41 @@ def save_rgb_tensor_as_mp4(
     return output_path
 
 
+def save_first_frame_from_video(video_path: str, output_path: str) -> str:
+    """
+    Extract the first frame of an MP4 file and save it as a PNG.
+
+    Used to record the entry frame of each generated segment so that
+    boundary SSIM drift scores can be computed between consecutive segments.
+
+    Args:
+        video_path:  Path to an existing .mp4 file.
+        output_path: Destination .png path.
+
+    Returns:
+        output_path (unchanged).
+
+    Raises:
+        FileNotFoundError: if video_path does not exist.
+    """
+    import numpy as np
+    import imageio
+    from PIL import Image
+
+    if not Path(video_path).exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    reader = imageio.get_reader(video_path, format="FFMPEG")
+    try:
+        first_frame = next(iter(reader))  # [H, W, 3] uint8
+    finally:
+        reader.close()
+
+    Image.fromarray(first_frame, mode="RGB").save(output_path)
+    logger.debug("Saved first frame to %s", output_path)
+    return output_path
+
+
 def save_last_frame(
     rgb: "torch.Tensor",
     output_path: str,

@@ -1339,6 +1339,13 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                     from ..rgba.compositor import save_rgb_tensor_as_mp4, save_last_frame
                     save_rgb_tensor_as_mp4(rgb, seg_path, fps=req.fps)
                     logger.info("[infinite %s] seg=%d composite saved to %s", task_id[:8], segment_idx, seg_path)
+                    # Drift metric: save first frame for boundary SSIM computation
+                    from ..rgba.compositor import save_first_frame_from_video
+                    first_frame_p = seg_path.replace(".mp4", "_first_frame.png")
+                    try:
+                        save_first_frame_from_video(seg_path, first_frame_p)
+                    except Exception:
+                        pass
                     # EchoShot: save last frame for next segment conditioning
                     last_frame_path = seg_path.replace(".mp4", "_last_frame.png")
                     save_last_frame(rgb, last_frame_path)
@@ -1380,6 +1387,13 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                     engine=engine,
                     image_path=prev_frame_path,
                 )
+                # Drift metric: save first frame for boundary SSIM computation
+                try:
+                    from ..rgba.compositor import save_first_frame_from_video
+                    first_frame_p = seg_path.replace(".mp4", "_first_frame.png")
+                    save_first_frame_from_video(seg_path, first_frame_p)
+                except Exception:
+                    pass
                 # EchoShot: update prev_frame_path for next segment
                 candidate = seg_path.replace(".mp4", "_last_frame.png")
                 prev_frame_path = candidate if Path(candidate).exists() else None
@@ -1429,8 +1443,22 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
             except Exception as bandit_err:
                 logger.debug("[infinite %s] Bandit reward skipped: %s", task_id[:8], bandit_err)
 
-            # Drift score from VACE overlap similarity (synthetic for now)
+            # Drift score: boundary SSIM between last frame of prev segment
+            # and first frame of current segment (0.0 = hard cut, 1.0 = seamless)
             drift_score = 0.0
+            if segment_idx > 0 and prev_frame_path:
+                try:
+                    from ..benchmark.metrics import compute_boundary_ssim
+                    first_frame_path = seg_path.replace(".mp4", "_first_frame.png")
+                    # Extract first frame of current segment for boundary comparison
+                    if Path(first_frame_path).exists():
+                        drift_score = compute_boundary_ssim(prev_frame_path, first_frame_path)
+                        logger.info(
+                            "[infinite %s] seg=%d boundary SSIM=%.4f (prev_last → cur_first)",
+                            task_id[:8], segment_idx, drift_score,
+                        )
+                except Exception as drift_err:
+                    logger.debug("[infinite %s] Drift score failed: %s", task_id[:8], drift_err)
 
             segment_results.append({
                 "segment_idx": segment_idx,

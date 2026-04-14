@@ -156,6 +156,38 @@ class VideoQualityMetrics:
             pass
         return None
 
+    def boundary_ssim(self, prev_last_frame: np.ndarray, next_first_frame: np.ndarray) -> float:
+        """
+        Compute SSIM between the last frame of one segment and the first frame
+        of the next to measure cross-segment temporal continuity.
+
+        A score near 1.0 means the boundary is seamless; near 0.0 means a
+        hard visual cut.  This is the primary drift metric for the infinite
+        generation pipeline.
+
+        Args:
+            prev_last_frame:  (H, W, C) or (H, W) float32 in [0, 1].
+            next_first_frame: (H, W, C) or (H, W) float32 in [0, 1], same shape.
+
+        Returns:
+            float SSIM in [-1, 1] (typically [0, 1] for natural images).
+        """
+        if prev_last_frame.shape != next_first_frame.shape:
+            raise ValueError(
+                f"Frame shape mismatch: {prev_last_frame.shape} vs {next_first_frame.shape}"
+            )
+        try:
+            from skimage.metrics import structural_similarity as ssim_fn
+            return float(ssim_fn(
+                prev_last_frame, next_first_frame,
+                channel_axis=-1 if prev_last_frame.ndim == 3 else None,
+                data_range=1.0,
+            ))
+        except ImportError:
+            return float(self._simple_ssim(
+                prev_last_frame[np.newaxis], next_first_frame[np.newaxis]
+            ))
+
     def format_report(self, metrics_list: List[Dict]) -> str:
         """Format a comparison table of metrics for multiple configurations."""
         if not metrics_list:
@@ -187,3 +219,29 @@ class VideoQualityMetrics:
         lines.append("=" * 70)
 
         return "\n".join(lines)
+
+
+def compute_boundary_ssim(prev_last_frame_path: str, next_first_frame_path: str) -> float:
+    """
+    Convenience function: load two PNG frame images and return boundary SSIM.
+
+    Returns 0.0 if either file is missing (graceful degradation for first segment
+    and error cases so the infinite loop is never blocked by a metric failure).
+
+    Args:
+        prev_last_frame_path:  Path to the last frame PNG of segment N.
+        next_first_frame_path: Path to the first frame PNG of segment N+1.
+
+    Returns:
+        float SSIM in [0, 1], or 0.0 on failure.
+    """
+    try:
+        import os
+        if not os.path.exists(prev_last_frame_path) or not os.path.exists(next_first_frame_path):
+            return 0.0
+        from PIL import Image
+        prev = np.array(Image.open(prev_last_frame_path).convert("RGB")).astype(np.float32) / 255.0
+        nxt = np.array(Image.open(next_first_frame_path).convert("RGB")).astype(np.float32) / 255.0
+        return VideoQualityMetrics(use_lpips=False, device="cpu").boundary_ssim(prev, nxt)
+    except Exception:
+        return 0.0
