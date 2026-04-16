@@ -129,9 +129,9 @@ async def evaluate(
     if not prompt:
         return {"success": False, "error": "prompt is required"}
 
-    if not _GEMINI_API_KEY:
-        return {"success": False, "error": "GEMINI_API_KEY not set — Gemini is the only supported evaluator"}
-    return await _evaluate_gemini(prompt, video_path)
+    if _GEMINI_API_KEY:
+        return await _evaluate_gemini(prompt, video_path)
+    return await _evaluate_ollama(prompt, video_path, video_description, n_frames)
 
 
 # ── Gemini backend ───────────────────────────────────────────────────────────
