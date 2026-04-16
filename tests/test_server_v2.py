@@ -136,7 +136,7 @@ class TestInfinitePipelineRunner:
         sys.modules["src.wan.generate"] = fake_module
         return fake_gen
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_single_segment_completes(self, tmp_path):
         from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
 
@@ -161,7 +161,7 @@ class TestInfinitePipelineRunner:
         assert result["segments_generated"] == 1
         assert len(result["segments"]) == 1
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_zero_max_segments_cancels_cleanly(self, tmp_path):
         """max_segments=0 (unlimited) — verify loop exits when status set to cancelled."""
         from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
@@ -195,8 +195,7 @@ class TestInfinitePipelineRunner:
         state = _registry.get(task_id)
         assert state is not None
 
-    @pytest.mark.asyncio
-    async def test_vace_and_svi_components_initialised(self, tmp_path):
+    def test_vace_and_svi_components_initialised(self, tmp_path):
         """Confirm VACEExtension and SVIRecycler are instantiated without error."""
         from src.vace.extension import VACEExtension, VACEConfig
         from src.svi.recycler import SVIRecycler, SVIConfig
@@ -207,8 +206,7 @@ class TestInfinitePipelineRunner:
         assert not vace.has_prior_segment
         assert not svi.has_correction
 
-    @pytest.mark.asyncio
-    async def test_director_advances_between_segments(self, tmp_path):
+    def test_director_advances_between_segments(self, tmp_path):
         """LLMDirector should produce a different prompt each call in fallback mode."""
         from src.llm.director import LLMDirector, DirectorConfig
 
@@ -265,7 +263,7 @@ class TestGenerateCompositeEndpoint:
             resp = client.post("/generate/composite", json={})
         assert resp.status_code == 422
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_composite_runner_produces_rgb(self, tmp_path):
         """_run_composite loads 3 RGBA .npy files and writes an RGB .npy output."""
         import numpy as np
@@ -295,7 +293,7 @@ class TestGenerateCompositeEndpoint:
         rgb = np.load(out_path)
         assert rgb.shape == (1, 3, 8, 32, 32)
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_composite_runner_error_on_bad_path(self, tmp_path):
         """_run_composite should record error status if a layer file doesn't exist."""
         from src.agent.server import _registry, _run_composite, CompositeRequest
@@ -325,7 +323,7 @@ class TestGetSegmentEndpoint:
         sys.modules.setdefault("src.wan", types.ModuleType("src.wan"))
         sys.modules["src.wan.generate"] = fake_module
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_segment_returns_metadata(self, tmp_path):
         """After a successful infinite run, segment 0 metadata is accessible."""
         from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
@@ -355,14 +353,14 @@ class TestGetSegmentEndpoint:
         assert body["segment_idx"] == 0
         assert "output_path" in body
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_segment_404_for_missing_task(self):
         """Unknown task_id should return 404."""
         with _make_client() as client:
             resp = client.get("/generate/does-not-exist/segment/0")
         assert resp.status_code == 404
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_segment_404_for_out_of_range(self, tmp_path):
         """Segment index beyond the task result should return 404."""
         from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
