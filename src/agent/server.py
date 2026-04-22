@@ -491,6 +491,155 @@ def create_app() -> FastAPI:
         return {"task_id": task_id, "status": "queued", "queue_position": _job_queue.qsize() - 1}
 
     # -----------------------------------------------------------------------
+    # Unity sync compatibility shims
+    # Enqueue the same jobs as the async endpoints, then block until done
+    # and return MP4 bytes directly — so Unity's job worker gets a sync response.
+    # -----------------------------------------------------------------------
+
+    @app.post("/generate")
+    @limiter.limit("5/minute")
+    async def unity_generate_sync(
+        request: Request,
+        req: SinglePassRequest,
+        _auth=Depends(require_api_key),
+    ):
+        """Unity sync shim: single-pass generation → MP4 bytes (5 min timeout)."""
+        from fastapi.responses import Response
+
+        task_id = str(uuid.uuid4())
+        _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
+
+        async def job():
+            await _run_single_gen(task_id, req)
+
+        await _enqueue(task_id, job)
+        task = await _wait_for_task(task_id, timeout=300.0)
+
+        if task.get("status") == "error":
+            raise HTTPException(status_code=500, detail=task.get("error", "Generation failed"))
+        if task.get("status") != "done":
+            raise HTTPException(status_code=504, detail="Generation timed out after 300s")
+
+        output_path = task.get("result", {}).get("output_path", "")
+        if not output_path or not Path(output_path).exists():
+            raise HTTPException(status_code=500, detail="Output file not found")
+
+        return Response(content=Path(output_path).read_bytes(), media_type="video/mp4")
+
+    @app.post("/generate/multipass")
+    @limiter.limit("5/minute")
+    async def unity_multipass_sync(
+        request: Request,
+        req: StackedRequest,
+        _auth=Depends(require_api_key),
+    ):
+        """Unity sync shim: stacked multi-pass → MP4 bytes + X-Pass-Number/X-Quality-Score headers."""
+        from fastapi.responses import Response
+
+        task_id = str(uuid.uuid4())
+        _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
+
+        async def job():
+            await _run_stacked_gen(task_id, req)
+
+        await _enqueue(task_id, job)
+        task = await _wait_for_task(task_id, timeout=300.0)
+
+        if task.get("status") == "error":
+            raise HTTPException(status_code=500, detail=task.get("error", "Generation failed"))
+        if task.get("status") != "done":
+            raise HTTPException(status_code=504, detail="Generation timed out after 300s")
+
+        result = task.get("result", {})
+        output_path = result.get("output_path", "")
+        if not output_path or not Path(output_path).exists():
+            raise HTTPException(status_code=500, detail="Output file not found")
+
+        quality_score = float(result.get("quality_score", 0.0))
+        return Response(
+            content=Path(output_path).read_bytes(),
+            media_type="video/mp4",
+            headers={
+                "X-Pass-Number": str(req.num_passes),
+                "X-Quality-Score": f"{quality_score:.3f}",
+            },
+        )
+
+    @app.post("/generate/layered")
+    @limiter.limit("2/minute")
+    async def unity_layered_sync(
+        request: Request,
+        req: InfiniteRequest,
+        _auth=Depends(require_api_key),
+    ):
+        """Unity sync shim: 3-layer RGBA composite → MP4 bytes + X-Layers/X-Blend-Mode/X-GPU-Temp-Max headers."""
+        from fastapi.responses import Response
+
+        # Force single-segment RGBA mode for the sync shim
+        req = req.model_copy(update={"max_segments": 1, "use_rgba_layers": True})
+
+        task_id = str(uuid.uuid4())
+        _registry.create(task_id)
+        _register_task_key(task_id, _get_caller_key(request))
+
+        async def job():
+            await _run_infinite_gen(task_id, req)
+
+        await _enqueue(task_id, job)
+        task = await _wait_for_task(task_id, timeout=300.0)
+
+        if task.get("status") == "error":
+            raise HTTPException(status_code=500, detail=task.get("error", "Generation failed"))
+        if task.get("status") != "done":
+            raise HTTPException(status_code=504, detail="Generation timed out after 300s")
+
+        result = task.get("result", {})
+        segments = result.get("segments", [])
+        output_path = segments[0].get("output_path", "") if segments else ""
+        if not output_path or not Path(output_path).exists():
+            raise HTTPException(status_code=500, detail="Output file not found")
+
+        gpu_temp_max = 0.0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_temp_max = float(torch.cuda.get_device_properties(0).total_memory / 1e9)
+        except Exception:
+            pass
+
+        return Response(
+            content=Path(output_path).read_bytes(),
+            media_type="video/mp4",
+            headers={
+                "X-Layers": "3",
+                "X-Blend-Mode": "porter-duff",
+                "X-GPU-Temp-Max": f"{gpu_temp_max:.1f}",
+            },
+        )
+
+    @app.post("/unload")
+    @limiter.limit("10/minute")
+    async def unity_unload(request: Request, _auth=Depends(require_api_key)):
+        """Release cached pipeline VRAM. Unity calls this after generation to free GPU memory."""
+        import gc
+
+        freed_mb = 0.0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                before = torch.cuda.memory_reserved()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                after = torch.cuda.memory_reserved()
+                freed_mb = max(0.0, (before - after) / 1e6)
+        except Exception:
+            pass
+        gc.collect()
+        return {"status": "ok", "freed_mb": round(freed_mb, 1), "queue_depth": _job_queue.qsize()}
+
+    # -----------------------------------------------------------------------
     # Heavy ops endpoints  (2/min)
     # -----------------------------------------------------------------------
 
@@ -923,6 +1072,17 @@ def _deduct_for_task(task_id: str, num_frames: int, fps: int) -> None:
 # ---------------------------------------------------------------------------
 # Background job runners  (called by queue worker — GPU semaphore already held)
 # ---------------------------------------------------------------------------
+
+async def _wait_for_task(task_id: str, timeout: float) -> dict:
+    """Poll the registry until the task reaches a terminal state or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task = _registry.get(task_id)
+        if task and task["status"] in ("done", "error"):
+            return task
+        await asyncio.sleep(0.5)
+    return _registry.get(task_id) or {}
+
 
 async def _run_single_gen(task_id: str, req: SinglePassRequest):
     _registry.update(task_id, progress="Loading pipeline...")
