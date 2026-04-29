@@ -1,6 +1,18 @@
+---
+layer: project
+bucket: submodules
+project: quant-stack-video
+inherits_from: [CLAUDE.md, submodules/CLAUDE.md]
+tags: [ruleset, project, submodules, quant-stack-video]
+updated: 2026-04-29
+---
+
 # CLAUDE.md — Quant-Stack Video
 
 Authoritative conventions for the quant-stack-video project. Read this every heartbeat.
+
+See `vaults/brain/wiki/products/quant-stack-video.md` for narrative product context (if present).
+See `.tools.yaml` (this dir, when present) for the dependency surface.
 
 ## Project
 
