@@ -1,0 +1,15 @@
+layer: project
+bucket: submodules
+project: quant-stack-video
+runtimes: []
+frameworks: []
+external_services: []
+infra: []
+provides:
+  - name: video-generation-engine
+    description: Programmatic video generation pipeline (sync-shim endpoints, gen-session launcher) used by Unity for marketing content
+    surface: HTTP API + CLI (gen-session)
+consumes: []
+entrypoints: []
+docs: [submodules/quant-stack-video/CLAUDE.md]
+updated: 2026-04-29
