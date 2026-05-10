@@ -115,35 +115,27 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
         else:
             raise ValueError(f"Unknown backend: {backend}")
 
-        # Pre-encode text on CPU to prevent UMT5-XXL (5 GB) from fragmenting VRAM.
-        # After encoding, move text encoder back to CPU and clear the allocator cache
-        # before the denoising loop allocates attention tensors.
+        # Force text encoder to run on CPU only (remove accelerate offload hooks so
+        # model_cpu_offload doesn't pull it to GPU). This keeps UMT5-XXL (~5 GB bf16)
+        # off the GPU, preventing VRAM fragmentation before the denoising loop.
         prompt_embeds = None
         negative_prompt_embeds = None
-        if args.cpu_text_encode and hasattr(pipe, 'encode_prompt'):
-            logger.info(f"  [{backend}] Pre-encoding prompt on CPU...")
-            if hasattr(pipe, 'text_encoder'):
-                pipe.text_encoder = pipe.text_encoder.to('cpu')
-            encode_result = pipe.encode_prompt(
-                prompt=prompt,
-                do_classifier_free_guidance=args.guidance_scale > 1.0,
-                negative_prompt=None,
-                device='cpu',
-            )
-            if isinstance(encode_result, tuple):
-                prompt_embeds, negative_prompt_embeds = encode_result[0], encode_result[1]
-            else:
-                prompt_embeds = encode_result
-            # Release VRAM fragmentation from text encoder
-            if hasattr(pipe, 'text_encoder'):
-                pipe.text_encoder = pipe.text_encoder.to('cpu')
+        if args.cpu_text_encode and hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+            logger.info(f"  [{backend}] Removing offload hooks from text encoder (keeping on CPU)...")
+            try:
+                from accelerate.hooks import remove_hook_from_module
+                remove_hook_from_module(pipe.text_encoder, recurse=True)
+            except (ImportError, Exception):
+                pass
+            pipe.text_encoder = pipe.text_encoder.to('cpu')
             gc.collect()
             torch.cuda.empty_cache()
-            logger.info(f"  [{backend}] Text encoding done; VRAM after cleanup: "
-                        f"{_peak_vram_gb():.2f} GB")
+            logger.info(f"  [{backend}] Text encoder CPU-only; current VRAM: "
+                        f"{torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
         gen = torch.Generator(device="cuda").manual_seed(args.seed)
-        call_kwargs = dict(
+        output = pipe(
+            prompt=prompt,
             height=args.height,
             width=args.width,
             num_frames=args.num_frames,
@@ -152,13 +144,6 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
             generator=gen,
             output_type="np",
         )
-        if prompt_embeds is not None:
-            call_kwargs["prompt_embeds"] = prompt_embeds.to("cuda")
-            if negative_prompt_embeds is not None:
-                call_kwargs["negative_prompt_embeds"] = negative_prompt_embeds.to("cuda")
-        else:
-            call_kwargs["prompt"] = prompt
-        output = pipe(**call_kwargs)
         frames = output.frames[0].astype("float32")
 
     except Exception as e:
