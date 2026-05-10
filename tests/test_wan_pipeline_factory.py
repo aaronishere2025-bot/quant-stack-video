@@ -115,6 +115,6 @@ class TestApplyMemoryOpts:
 class TestGGUFConstants:
     def test_gguf_hf_repo_defined(self):
         from src.wan.pipeline_factory import GGUF_HF_REPO, GGUF_Q4_0_FILENAME, GGUF_Q3_KM_FILENAME
-        assert "bartowski" in GGUF_HF_REPO
+        assert "city96" in GGUF_HF_REPO
         assert "Q4_0" in GGUF_Q4_0_FILENAME
         assert "Q3_K_M" in GGUF_Q3_KM_FILENAME

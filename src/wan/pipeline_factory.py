@@ -33,9 +33,9 @@ WAN_14B_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
 WAN_1_3B_MODEL_ID = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 
 # Known community GGUF repos for Wan 2.1 14B (Q4_0 and Q3_K_M)
-GGUF_HF_REPO = "bartowski/Wan2.1-T2V-14B-GGUF"
-GGUF_Q4_0_FILENAME = "Wan2.1-T2V-14B-Q4_0.gguf"
-GGUF_Q3_KM_FILENAME = "Wan2.1-T2V-14B-Q3_K_M.gguf"
+GGUF_HF_REPO = "city96/Wan2.1-T2V-14B-gguf"
+GGUF_Q4_0_FILENAME = "wan2.1-t2v-14b-Q4_0.gguf"
+GGUF_Q3_KM_FILENAME = "wan2.1-t2v-14b-Q3_K_M.gguf"
 
 
 class WanPipelineFactory:

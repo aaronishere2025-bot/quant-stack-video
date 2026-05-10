@@ -13,8 +13,8 @@ Usage:
         --gguf-path /path/to/Wan2.1-T2V-14B-Q4_0.gguf
 
     # Download GGUF from HuggingFace first:
-    huggingface-cli download bartowski/Wan2.1-T2V-14B-GGUF \\
-        Wan2.1-T2V-14B-Q4_0.gguf --local-dir ./models/gguf/
+    huggingface-cli download city96/Wan2.1-T2V-14B-gguf \\
+        wan2.1-t2v-14b-Q4_0.gguf --local-dir ./models/gguf/
 
     # Use 1.3B model for quick iteration (no GGUF available — BnB only):
     python scripts/benchmark_gguf_vs_bnb.py --model-id Wan-AI/Wan2.1-T2V-1.3B-Diffusers
@@ -152,8 +152,8 @@ def run_benchmark(args):
         backends.append("gguf")
     else:
         logger.warning("--gguf-path not provided — skipping GGUF backend. "
-                       "Download from: huggingface-cli download bartowski/Wan2.1-T2V-14B-GGUF "
-                       "Wan2.1-T2V-14B-Q4_0.gguf --local-dir ./models/gguf/")
+                       "Download from: huggingface-cli download city96/Wan2.1-T2V-14B-gguf "
+                       "wan2.1-t2v-14b-Q4_0.gguf --local-dir ./models/gguf/")
 
     prompts = BENCHMARK_PROMPTS if not args.single_prompt else [BENCHMARK_PROMPTS[0]]
 
