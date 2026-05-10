@@ -36,6 +36,10 @@ import torch
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _fmt(value, fmt, default="N/A"):
+    return f"{value:{fmt}}" if value is not None else default
+
 BENCHMARK_PROMPTS = [
     "A serene mountain lake at sunrise, mist rising from the water, golden cinematic light",
     "A busy city street at night, neon lights reflecting on wet pavement, people walking",
@@ -147,13 +151,17 @@ def run_benchmark(args):
     reference_frames_by_prompt = {}
 
     # Determine which backends to run
-    backends = ["bf16", "bnb_nf4"]
+    backends = [] if args.skip_bf16 else ["bf16"]
+    backends.append("bnb_nf4")
     if args.gguf_path:
         backends.append("gguf")
     else:
         logger.warning("--gguf-path not provided — skipping GGUF backend. "
                        "Download from: huggingface-cli download city96/Wan2.1-T2V-14B-gguf "
                        "wan2.1-t2v-14b-Q4_0.gguf --local-dir ./models/gguf/")
+
+    # First backend is the reference for PSNR/SSIM computation
+    reference_backend = backends[0]
 
     prompts = BENCHMARK_PROMPTS if not args.single_prompt else [BENCHMARK_PROMPTS[0]]
 
@@ -169,7 +177,7 @@ def run_benchmark(args):
                 npy_path = out_dir / f"p{prompt_idx}_{backend}_frames.npy"
                 np.save(npy_path, frames)
 
-                if backend == "bf16":
+                if backend == reference_backend:
                     reference_frames_by_prompt[prompt_idx] = frames
                 elif prompt_idx in reference_frames_by_prompt:
                     ref = reference_frames_by_prompt[prompt_idx]
@@ -178,9 +186,12 @@ def run_benchmark(args):
                     result.ssim = m["ssim"]
 
             all_results.append(result)
-            logger.info(f"  {backend}: {result.generation_time_s:.1f}s | VRAM: {result.peak_vram_gb:.2f} GB | "
-                        f"PSNR: {result.psnr:.2f if result.psnr else 'N/A'} | "
-                        f"SSIM: {result.ssim:.4f if result.ssim else 'N/A'}")
+            logger.info(
+                f"  {backend}: {result.generation_time_s:.1f}s | "
+                f"VRAM: {_fmt(result.peak_vram_gb, '.2f')} GB | "
+                f"PSNR: {_fmt(result.psnr, '.2f')} | "
+                f"SSIM: {_fmt(result.ssim, '.4f')}"
+            )
 
     _write_report(all_results, out_dir, args)
     return all_results
@@ -232,8 +243,8 @@ def _write_markdown(results: list, args):
         avg_ssim = sum(ssim_vals) / len(ssim_vals) if ssim_vals else None
         lines.append(
             f"| `{backend}` | {avg_vram:.2f} | {avg_time:.0f} | "
-            f"{avg_psnr:.1f if avg_psnr else 'ref'} | "
-            f"{avg_ssim:.4f if avg_ssim else 'ref'} |"
+            f"{_fmt(avg_psnr, '.1f', 'ref')} | "
+            f"{_fmt(avg_ssim, '.4f', 'ref')} |"
         )
 
     lines += [
@@ -244,9 +255,9 @@ def _write_markdown(results: list, args):
 
     for r in results:
         status = f"FAILED: {r.error}" if r.error else (
-            f"VRAM={r.peak_vram_gb:.2f} GB | {r.generation_time_s:.0f}s | "
-            f"PSNR={r.psnr:.1f if r.psnr else 'ref'} dB | "
-            f"SSIM={r.ssim:.4f if r.ssim else 'ref'}"
+            f"VRAM={_fmt(r.peak_vram_gb, '.2f')} GB | {r.generation_time_s:.0f}s | "
+            f"PSNR={_fmt(r.psnr, '.1f', 'ref')} dB | "
+            f"SSIM={_fmt(r.ssim, '.4f', 'ref')}"
         )
         lines.append(f"- **P{r.prompt_idx} [{r.backend}]**: {status}")
 
@@ -281,6 +292,9 @@ def parse_args():
     p.add_argument("--guidance-scale", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--single-prompt", action="store_true", help="Only run first prompt (quick test)")
+    p.add_argument("--skip-bf16", action="store_true",
+                   help="Skip bf16 reference (required for 14B — won't fit in 12 GB VRAM). "
+                        "Uses bnb_nf4 as reference baseline instead.")
     return p.parse_args()
 
 
