@@ -118,10 +118,12 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
         # Force text encoder to run on CPU only (remove accelerate offload hooks so
         # model_cpu_offload doesn't pull it to GPU). This keeps UMT5-XXL (~5 GB bf16)
         # off the GPU, preventing VRAM fragmentation before the denoising loop.
-        prompt_embeds = None
-        negative_prompt_embeds = None
+        # Then pre-encode the prompt on CPU, move embeddings to GPU, clear VRAM,
+        # and pass prompt_embeds to skip in-pipeline text encoding.
+        prompt_embeds_gpu = None
+        negative_prompt_embeds_gpu = None
         if args.cpu_text_encode and hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
-            logger.info(f"  [{backend}] Removing offload hooks from text encoder (keeping on CPU)...")
+            logger.info(f"  [{backend}] Removing offload hooks; encoding prompt on CPU...")
             try:
                 from accelerate.hooks import remove_hook_from_module
                 remove_hook_from_module(pipe.text_encoder, recurse=True)
@@ -130,20 +132,48 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
             pipe.text_encoder = pipe.text_encoder.to('cpu')
             gc.collect()
             torch.cuda.empty_cache()
-            logger.info(f"  [{backend}] Text encoder CPU-only; current VRAM: "
+
+            # Encode on CPU — text encoder stays CPU, no VRAM used
+            do_cfg = args.guidance_scale > 1.0
+            prompt_embeds_cpu, neg_embeds_cpu = pipe.encode_prompt(
+                prompt=prompt,
+                negative_prompt=None,
+                do_classifier_free_guidance=do_cfg,
+                num_videos_per_prompt=1,
+                device=torch.device('cpu'),
+            )
+            prompt_embeds_gpu = prompt_embeds_cpu.to('cuda')
+            negative_prompt_embeds_gpu = neg_embeds_cpu.to('cuda') if neg_embeds_cpu is not None else None
+            del prompt_embeds_cpu, neg_embeds_cpu
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"  [{backend}] Encoded; VRAM now: "
                         f"{torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
         gen = torch.Generator(device="cuda").manual_seed(args.seed)
-        output = pipe(
-            prompt=prompt,
-            height=args.height,
-            width=args.width,
-            num_frames=args.num_frames,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=args.guidance_scale,
-            generator=gen,
-            output_type="np",
-        )
+        if prompt_embeds_gpu is not None:
+            output = pipe(
+                prompt_embeds=prompt_embeds_gpu,
+                negative_prompt_embeds=negative_prompt_embeds_gpu,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                generator=gen,
+                output_type="np",
+            )
+        else:
+            output = pipe(
+                prompt=prompt,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                generator=gen,
+                output_type="np",
+            )
         frames = output.frames[0].astype("float32")
 
     except Exception as e:
