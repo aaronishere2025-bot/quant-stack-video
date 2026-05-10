@@ -87,27 +87,63 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
     frames = None
 
     try:
+        seq_offload = getattr(args, "sequential_offload", False)
         if backend == "gguf":
             factory = WanPipelineFactory(
                 model_id=model_id,
                 engine="gguf",
                 gguf_model_path=gguf_path,
                 gguf_compute_dtype="bfloat16",
-                enable_model_cpu_offload=True,
+                enable_model_cpu_offload=not seq_offload,
+                enable_sequential_cpu_offload=seq_offload,
             )
             pipe = factory(None)
         elif backend == "bnb_nf4":
-            factory = WanPipelineFactory(model_id=model_id, engine="bnb", enable_model_cpu_offload=True)
+            factory = WanPipelineFactory(
+                model_id=model_id, engine="bnb",
+                enable_model_cpu_offload=not seq_offload,
+                enable_sequential_cpu_offload=seq_offload,
+            )
             pipe = factory(QuantConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True))
         elif backend == "bf16":
-            factory = WanPipelineFactory(model_id=model_id, engine="bnb", enable_model_cpu_offload=True)
+            factory = WanPipelineFactory(
+                model_id=model_id, engine="bnb",
+                enable_model_cpu_offload=not seq_offload,
+                enable_sequential_cpu_offload=seq_offload,
+            )
             pipe = factory(QuantConfig(quant_type="none", load_in_4bit=False, load_in_8bit=False))
         else:
             raise ValueError(f"Unknown backend: {backend}")
 
+        # Pre-encode text on CPU to prevent UMT5-XXL (5 GB) from fragmenting VRAM.
+        # After encoding, move text encoder back to CPU and clear the allocator cache
+        # before the denoising loop allocates attention tensors.
+        prompt_embeds = None
+        negative_prompt_embeds = None
+        if args.cpu_text_encode and hasattr(pipe, 'encode_prompt'):
+            logger.info(f"  [{backend}] Pre-encoding prompt on CPU...")
+            if hasattr(pipe, 'text_encoder'):
+                pipe.text_encoder = pipe.text_encoder.to('cpu')
+            encode_result = pipe.encode_prompt(
+                prompt=prompt,
+                do_classifier_free_guidance=args.guidance_scale > 1.0,
+                negative_prompt=None,
+                device='cpu',
+            )
+            if isinstance(encode_result, tuple):
+                prompt_embeds, negative_prompt_embeds = encode_result[0], encode_result[1]
+            else:
+                prompt_embeds = encode_result
+            # Release VRAM fragmentation from text encoder
+            if hasattr(pipe, 'text_encoder'):
+                pipe.text_encoder = pipe.text_encoder.to('cpu')
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info(f"  [{backend}] Text encoding done; VRAM after cleanup: "
+                        f"{_peak_vram_gb():.2f} GB")
+
         gen = torch.Generator(device="cuda").manual_seed(args.seed)
-        output = pipe(
-            prompt=prompt,
+        call_kwargs = dict(
             height=args.height,
             width=args.width,
             num_frames=args.num_frames,
@@ -116,6 +152,13 @@ def _run_backend(backend: str, model_id: str, gguf_path: Optional[str], prompt: 
             generator=gen,
             output_type="np",
         )
+        if prompt_embeds is not None:
+            call_kwargs["prompt_embeds"] = prompt_embeds.to("cuda")
+            if negative_prompt_embeds is not None:
+                call_kwargs["negative_prompt_embeds"] = negative_prompt_embeds.to("cuda")
+        else:
+            call_kwargs["prompt"] = prompt
+        output = pipe(**call_kwargs)
         frames = output.frames[0].astype("float32")
 
     except Exception as e:
@@ -295,6 +338,12 @@ def parse_args():
     p.add_argument("--skip-bf16", action="store_true",
                    help="Skip bf16 reference (required for 14B — won't fit in 12 GB VRAM). "
                         "Uses bnb_nf4 as reference baseline instead.")
+    p.add_argument("--sequential-offload", action="store_true",
+                   help="Use enable_sequential_cpu_offload instead of enable_model_cpu_offload. "
+                        "Slower inference but prevents VRAM fragmentation from large text encoders.")
+    p.add_argument("--cpu-text-encode", action="store_true",
+                   help="Pre-encode the text prompt on CPU then clear VRAM before denoising. "
+                        "Prevents UMT5-XXL (~5 GB) from fragmenting the CUDA allocator pool.")
     return p.parse_args()
 
 
