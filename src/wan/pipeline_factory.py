@@ -215,7 +215,7 @@ class WanPipelineFactory:
         )
 
         logger.info("Loading text encoder (bf16, CPU)...")
-        text_encoder = T5EncoderModel.from_pretrained(
+        text_encoder = UMT5EncoderModel.from_pretrained(
             self.model_id,
             subfolder="text_encoder",
             torch_dtype=text_dtype,
