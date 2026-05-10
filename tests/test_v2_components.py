@@ -563,7 +563,28 @@ class TestLLMDirector:
             director.next_segment(i)
         # Time should have progressed at some point
         # (first progression happens at segment_idx=6)
-        assert director.current_state.time_of_day in ["dawn", "morning", "day", "afternoon", "dusk", "evening", "night"]
+        from src.llm.director import LLMDirector
+        assert director.current_state.time_of_day in LLMDirector._TIMES
+
+    def test_fallback_produces_varied_prompts(self):
+        from src.llm.director import LLMDirector, DirectorConfig
+
+        config = DirectorConfig(use_static_prompt_fallback=True)
+        director = LLMDirector("A river at sunset", config)
+        prompts = [director.next_segment(i).prompt for i in range(5)]
+        # Each segment should produce a distinct prompt
+        assert len(set(prompts)) > 1
+
+    def test_fallback_scene_change_at_interval(self):
+        from src.llm.director import LLMDirector, DirectorConfig
+
+        config = DirectorConfig(use_static_prompt_fallback=True)
+        director = LLMDirector("A city street at night", config)
+        directives = [director.next_segment(i) for i in range(11)]
+        # Segment 10 triggers the first scene change (10 % 10 == 0, idx > 0)
+        assert directives[10].is_scene_change is True
+        # All earlier segments are not scene changes
+        assert all(not d.is_scene_change for d in directives[:10])
 
     def test_history_summary_length(self):
         from src.llm.director import LLMDirector

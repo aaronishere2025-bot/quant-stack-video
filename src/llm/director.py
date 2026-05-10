@@ -268,38 +268,84 @@ class LLMDirector:
             arm_ids=arm_ids,
         )
 
+    # Deterministic pools — indexed by (segment_idx % len) for repeatability
+    _MOTION_VERBS: List[str] = [
+        "slowly moving through", "drifting across", "sweeping over",
+        "gliding past", "hovering above", "panning across",
+        "zooming into", "pulling back from", "circling around",
+        "following through",
+    ]
+    _MOODS: List[str] = [
+        "cinematic", "dramatic", "serene", "tense", "ethereal",
+        "melancholic", "vibrant", "mysterious",
+    ]
+    _TIMES: List[str] = [
+        "dawn", "morning", "midday", "afternoon", "golden hour",
+        "dusk", "twilight", "night",
+    ]
+    _ATMOSPHERE_SUFFIXES: List[str] = [
+        "with soft natural light", "under dramatic clouds", "in golden sunlight",
+        "with misty atmosphere", "in sharp cinematic focus",
+        "with rich color grading", "in shallow depth of field",
+    ]
+    _SCENE_TRANSITIONS: List[str] = [
+        "urban street", "open field", "dense forest", "ocean cliffside",
+        "mountain ridge", "narrow alley", "rooftop terrace",
+        "underground tunnel", "riverside path", "market square",
+    ]
+
     def _fallback_directive(self, segment_idx: int) -> SegmentDirective:
         """
         Deterministic fallback when no LLM is configured or LLM call fails.
 
-        Advances the prompt by appending state context. No scene changes in fallback mode.
+        All choices are keyed to segment_idx so the same index always yields
+        the same output regardless of call order. Scene changes occur every
+        10 segments; time and mood advance every 3.
         """
-        context_parts = [self.base_prompt]
+        _SCENE_CHANGE_INTERVAL = 10
 
+        is_scene_change = (segment_idx > 0) and (segment_idx % _SCENE_CHANGE_INTERVAL == 0)
+
+        # Advance time and mood every 3 segments
+        time_step = segment_idx // 3
+        mood_step = segment_idx // 3
+        self._state.time_of_day = self._TIMES[time_step % len(self._TIMES)]
+        self._state.mood = self._MOODS[mood_step % len(self._MOODS)]
+
+        if is_scene_change:
+            # Rotate to a new location on scene changes
+            scene_num = segment_idx // _SCENE_CHANGE_INTERVAL
+            self._state.current_location = self._SCENE_TRANSITIONS[
+                scene_num % len(self._SCENE_TRANSITIONS)
+            ]
+            self._state.scene_number += 1
+            self._state.is_scene_change = True
+        else:
+            self._state.is_scene_change = False
+
+        motion = self._MOTION_VERBS[segment_idx % len(self._MOTION_VERBS)]
+        atmosphere = self._ATMOSPHERE_SUFFIXES[segment_idx % len(self._ATMOSPHERE_SUFFIXES)]
+
+        context_parts = [f"camera {motion} the scene"]
         if self._state.current_location:
             context_parts.append(f"in the {self._state.current_location}")
-        if self._state.mood and self._state.mood != "neutral":
-            context_parts.append(f"{self._state.mood} atmosphere")
-        if self._state.time_of_day:
-            context_parts.append(self._state.time_of_day)
+        context_parts.append(self._state.time_of_day)
+        context_parts.append(f"{self._state.mood} mood")
+        context_parts.append(atmosphere)
 
-        # Slowly evolve time of day
-        time_progression = ["dawn", "morning", "day", "afternoon", "dusk", "evening", "night"]
-        try:
-            current_idx = time_progression.index(self._state.time_of_day)
-            if segment_idx % 6 == 0 and current_idx < len(time_progression) - 1:
-                self._state.time_of_day = time_progression[current_idx + 1]
-        except ValueError:
-            pass
-
-        prompt = ", ".join(context_parts) + self.config.fallback_prompt_suffix
+        # Weave the base prompt concept in every segment for thematic continuity
+        base_concept = self.base_prompt.split(",")[0].strip()
+        prompt = (
+            f"{base_concept}, {', '.join(context_parts)}"
+            + self.config.fallback_prompt_suffix
+        )
 
         enhanced_prompt, arm_ids = self._bandit.build_enhanced_prompt(prompt, engine=self.engine)
 
         return SegmentDirective(
             prompt=enhanced_prompt,
             state=self._state,
-            is_scene_change=False,
+            is_scene_change=is_scene_change,
             segment_idx=segment_idx,
             arm_ids=arm_ids,
         )
