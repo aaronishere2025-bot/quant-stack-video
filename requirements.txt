@@ -6,6 +6,7 @@ transformers>=4.40.0
 accelerate>=0.30.0
 bitsandbytes>=0.43.0
 safetensors>=0.4.0
+gguf>=0.10.0
 huggingface-hub>=0.23.0
 numpy>=1.26.0
 Pillow>=10.0.0

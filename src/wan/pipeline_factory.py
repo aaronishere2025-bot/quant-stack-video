@@ -22,7 +22,7 @@ from typing import Optional
 
 import torch
 from diffusers import AutoencoderKLWan, WanPipeline
-from transformers import AutoTokenizer, T5EncoderModel
+from transformers import AutoTokenizer, UMT5EncoderModel
 
 from ..quant.config import QuantConfig
 
@@ -144,7 +144,7 @@ class WanPipelineFactory:
             )
 
             logger.info("Loading text encoder (bf16)...")
-            text_encoder = T5EncoderModel.from_pretrained(
+            text_encoder = UMT5EncoderModel.from_pretrained(
                 self.model_id,
                 subfolder="text_encoder",
                 torch_dtype=text_dtype,
@@ -211,6 +211,7 @@ class WanPipelineFactory:
             quantization_config=gguf_config,
             torch_dtype=compute_dtype,
             config=self.model_id,
+            subfolder="transformer",
         )
 
         logger.info("Loading text encoder (bf16, CPU)...")
