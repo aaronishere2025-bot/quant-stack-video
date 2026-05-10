@@ -19,7 +19,15 @@ else
   echo "Auth: open mode — set VIDEO_API_KEYS to require authentication"
 fi
 
-python -m uvicorn src.agent.server:app \
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+  # Fallback: use whatever python3 is on PATH
+  VENV_PYTHON="python3"
+fi
+
+"$VENV_PYTHON" -m uvicorn src.agent.server:app \
     --host 0.0.0.0 \
     --port 8400 \
     --reload \

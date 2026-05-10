@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
 from fastapi.security.api_key import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -184,6 +184,8 @@ async def _enqueue(task_id: str, job_fn) -> None:
 # ---------------------------------------------------------------------------
 
 class GenerateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     prompt: str
     negative_prompt: str = (
         "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
@@ -248,6 +250,8 @@ class CompositeRequest(BaseModel):
 
 
 class BenchmarkRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     prompts: List[str] = Field(default_factory=lambda: [
         "A serene mountain lake at sunrise, mist rising from the water"
     ])
