@@ -42,6 +42,48 @@ class TestWanPipelineFactoryBnb:
             mock_build.assert_called_once_with(cfg)
 
 
+class TestBnbTransformerCpuLoad:
+    """Verify BnB transformer is loaded with device_map='cpu' to prevent OOM on 14B models."""
+
+    def test_bnb_transformer_loads_to_cpu(self):
+        """device_map='cpu' must be passed so shards quantize on CPU without double-buffering VRAM."""
+        import diffusers
+        from src.wan.pipeline_factory import WanPipelineFactory
+        from src.quant.config import QuantConfig
+
+        mock_bnb_config = MagicMock()
+        mock_transformer = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.enable_model_cpu_offload = MagicMock()
+        mock_pipe.enable_vae_slicing = MagicMock()
+
+        mock_wan_transformer_cls = MagicMock()
+        mock_wan_transformer_cls.from_pretrained.return_value = mock_transformer
+
+        # WanTransformer3DModel is imported locally inside _build_pipeline, so patch
+        # the attribute on the diffusers module object itself.
+        with patch.object(diffusers, "WanTransformer3DModel", mock_wan_transformer_cls), \
+             patch("src.wan.pipeline_factory.UMT5EncoderModel") as mock_te_cls, \
+             patch("src.wan.pipeline_factory.AutoencoderKLWan") as mock_vae_cls, \
+             patch("src.wan.pipeline_factory.WanPipeline") as mock_pipeline_cls:
+
+            mock_te_cls.from_pretrained.return_value = MagicMock()
+            mock_vae_cls.from_pretrained.return_value = MagicMock()
+            mock_pipeline_cls.from_pretrained.return_value = mock_pipe
+
+            factory = WanPipelineFactory(engine="bnb")
+            cfg = QuantConfig()
+            with patch.object(cfg, "to_bnb_config", return_value=mock_bnb_config):
+                factory(cfg)
+
+        call_kwargs = mock_wan_transformer_cls.from_pretrained.call_args
+        assert call_kwargs is not None, "WanTransformer3DModel.from_pretrained was not called"
+        kwargs = call_kwargs.kwargs
+        assert kwargs.get("device_map") == "cpu", (
+            f"Expected device_map='cpu' to prevent OOM during shard loading, got: {kwargs.get('device_map')!r}"
+        )
+
+
 class TestWanPipelineFactoryGGUF:
     def test_gguf_requires_path(self):
         from src.wan.pipeline_factory import WanPipelineFactory

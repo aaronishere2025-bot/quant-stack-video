@@ -134,12 +134,13 @@ class WanPipelineFactory:
             # Load transformer with quantization; other components in higher precision
             from diffusers import WanTransformer3DModel
 
-            logger.info("Loading quantized transformer...")
+            logger.info("Loading quantized transformer (CPU staging to avoid double-buffer OOM)...")
             transformer = WanTransformer3DModel.from_pretrained(
                 self.model_id,
                 subfolder="transformer",
                 quantization_config=bnb_config,
                 torch_dtype=transformer_dtype,
+                device_map="cpu",
                 cache_dir=self.cache_dir,
             )
 
