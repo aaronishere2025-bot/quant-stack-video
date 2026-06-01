@@ -9,6 +9,18 @@ updated: 2026-04-29
 
 # CLAUDE.md — Quant-Stack Video
 
+## Coding rules (MANDATORY)
+This project is governed by the central Pair-Programmer ruleset.
+READ IT NOW if it is not already in context:
+
+    /mnt/d/ai-workspace/docs/kit/05-coding-ruleset.md
+
+All 70+ rules across 12 categories are binding. The hard-block and
+audited-block tiers are additionally enforced by hooks in this repo's
+`.claude/settings.json` — those actions are mechanically refused. If the
+ruleset above cannot be read, STOP and say so; do not proceed without it.
+
+
 Authoritative conventions for the quant-stack-video project. Read this every heartbeat.
 
 See `vaults/brain/wiki/products/quant-stack-video.md` for narrative product context (if present).
