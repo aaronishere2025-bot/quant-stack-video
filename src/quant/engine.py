@@ -49,6 +49,11 @@ class QuantStackEngine:
         self.config = stack_config or StackConfig()
         self._pass_latents: List[Any] = []
         self._pass_times: List[float] = []
+        # CPU text-embed cache, keyed by (prompt, negative_prompt, do_cfg). The
+        # prompt is identical across stacking passes, so we encode UMT5-XXL once
+        # and reuse — the encode is the dominant per-pass cost. Scoped to this
+        # engine instance (created fresh per generation) and cleared after run.
+        self._embed_cache: Dict[Any, Any] = {}
 
     def run_stacked(
         self,
@@ -82,7 +87,20 @@ class QuantStackEngine:
         """
         strategy = self.config.stacking_strategy
         logger.info(f"Starting {self.config.num_passes}-pass quant stack (strategy={strategy})")
+        self._embed_cache.clear()
+        try:
+            return self._dispatch_strategy(
+                strategy, pipeline_factory, prompt, negative_prompt,
+                height, width, num_frames, num_inference_steps, guidance_scale, seed, **extra_kwargs
+            )
+        finally:
+            # Release the cached CPU embeds (a few MB each) once the run is done.
+            self._embed_cache.clear()
 
+    def _dispatch_strategy(
+        self, strategy, pipeline_factory, prompt, negative_prompt,
+        height, width, num_frames, num_inference_steps, guidance_scale, seed, **extra_kwargs
+    ):
         if strategy == "average":
             return self._run_average(
                 pipeline_factory, prompt, negative_prompt,
@@ -455,12 +473,18 @@ class QuantStackEngine:
         text encoder to CPU and passing prompt_embeds keeps it off the GPU entirely.
         Same fix as wan/generate.py::generate_video; see docs/benchmark_gguf_vs_bnb.md.
 
+        The CPU encode is also the dominant per-pass cost (~minutes), and the prompt
+        is identical across stacking passes — so the encoded embeds are cached on the
+        engine (keyed by prompt/neg/cfg) and reused: only pass 1 pays the encode.
+
         Falls back to plain prompt= kwargs if the pipe has no separable text encoder.
         """
         import gc
         import torch
         if getattr(pipe, "text_encoder", None) is None:
             return {"prompt": prompt, "negative_prompt": negative_prompt}
+        # Keep the 6 GB encoder off the GPU regardless of cache state — each pass
+        # loads a fresh pipe that re-attaches offload hooks. Cheap when already on CPU.
         try:
             from accelerate.hooks import remove_hook_from_module
             remove_hook_from_module(pipe.text_encoder, recurse=True)
@@ -470,17 +494,25 @@ class QuantStackEngine:
         gc.collect()
         torch.cuda.empty_cache()
         do_cfg = guidance_scale > 1.0
-        pe_cpu, ne_cpu = pipe.encode_prompt(
-            prompt=prompt,
-            negative_prompt=negative_prompt if do_cfg else None,
-            do_classifier_free_guidance=do_cfg,
-            num_videos_per_prompt=1,
-            device=torch.device("cpu"),
-        )
+        cache_key = (prompt, negative_prompt, do_cfg)
+        cached = self._embed_cache.get(cache_key)
+        if cached is None:
+            # Expensive: UMT5-XXL forward on CPU. Runs once per distinct prompt;
+            # subsequent stacking passes hit the cache and skip it entirely.
+            pe_cpu, ne_cpu = pipe.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt if do_cfg else None,
+                do_classifier_free_guidance=do_cfg,
+                num_videos_per_prompt=1,
+                device=torch.device("cpu"),
+            )
+            self._embed_cache[cache_key] = (pe_cpu, ne_cpu)
+        else:
+            pe_cpu, ne_cpu = cached
+        # Move fresh GPU copies for this pass; the CPU originals stay cached.
         kwargs = {"prompt_embeds": pe_cpu.to("cuda")}
         if ne_cpu is not None:
             kwargs["negative_prompt_embeds"] = ne_cpu.to("cuda")
-        del pe_cpu, ne_cpu
         gc.collect()
         torch.cuda.empty_cache()
         return kwargs
