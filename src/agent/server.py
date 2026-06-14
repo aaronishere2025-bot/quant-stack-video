@@ -1152,10 +1152,19 @@ async def _run_stacked_gen(task_id: str, req: StackedRequest):
             cache_dir=req.cache_dir,
             fps=req.fps,
         )
-        # The engine result carries the raw frame array — not JSON-serializable;
-        # the mp4 is already on disk, so store metadata only.
-        result.pop("frames", None)
-        _registry.update(task_id, status="done", result=result)
+        # The engine result carries raw frame arrays (frames, all_pass_frames) that
+        # FastAPI's jsonable_encoder can't serialize — /tasks/{id} would 500. The mp4
+        # is already on disk, so keep only JSON-safe scalar/metadata keys and surface
+        # output_path (which the engine result omits) for the /video download route.
+        import numpy as _np
+        clean = {"output_path": output_path}
+        for k, v in result.items():
+            if isinstance(v, _np.ndarray):
+                continue
+            if isinstance(v, (list, tuple)) and v and isinstance(v[0], _np.ndarray):
+                continue
+            clean[k] = v
+        _registry.update(task_id, status="done", result=clean)
         _deduct_for_task(task_id, req.num_frames, req.fps)
     except Exception as e:
         logger.exception("Task %s failed", task_id)

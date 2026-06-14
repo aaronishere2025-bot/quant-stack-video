@@ -305,6 +305,47 @@ class TestInfinitePipelineRunner:
         assert segments[0]["output_path"] is None
         assert "error" in segments[0]
 
+    @pytest.mark.anyio
+    async def test_stacked_result_is_json_serializable(self, tmp_path):
+        """The stacked engine result carries raw frame arrays (frames + all_pass_frames);
+        _run_stacked_gen must strip every array so GET /tasks/{id} can serialize, and must
+        surface output_path (the engine result omits it). Regression for the 2026-06-14
+        GPU re-test 500: jsonable_encoder choking on a numpy array.
+        """
+        import sys
+        import types
+        import numpy as np
+        from fastapi.encoders import jsonable_encoder
+        from src.agent.server import _registry, _run_stacked_gen, StackedRequest
+
+        def _fake_stacked(**kwargs):
+            return {
+                "frames": np.zeros((81, 480, 832, 3), dtype=np.float32),
+                "all_pass_frames": [np.zeros((81, 480, 832, 3), dtype=np.float32) for _ in range(3)],
+                "pass_times": [12.3, 11.8, 12.1],
+                "strategy": "progressive",
+                "total_time": 36.2,
+            }
+
+        fake_module = types.ModuleType("src.wan.generate")
+        fake_module.generate_video_stacked = _fake_stacked
+        sys.modules.setdefault("src.wan", types.ModuleType("src.wan"))
+        sys.modules["src.wan.generate"] = fake_module
+
+        task_id = "test-stacked-serial-001"
+        _registry.create(task_id)
+        req = StackedRequest(prompt="Roman forum", num_passes=3, output_dir=str(tmp_path))
+        await _run_stacked_gen(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "done", f"expected done, got {state['status']}: {state.get('error')}"
+        result = state["result"]
+        assert "frames" not in result and "all_pass_frames" not in result
+        assert result["output_path"].endswith(".mp4")
+        assert result["pass_times"] == [12.3, 11.8, 12.1]
+        # The real failure was in FastAPI's encoder — exercise it directly.
+        jsonable_encoder(result)
+
 
 # ---------------------------------------------------------------------------
 # POST /generate/composite endpoint
