@@ -23,9 +23,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
 
 if [ ! -x "$VENV_PYTHON" ]; then
-  # Fallback: use whatever python3 is on PATH
-  VENV_PYTHON="python3"
+  # Post-wedge rebuild venv on ext4 (the in-repo .venv died with the old distro)
+  if [ -x "$HOME/.venvs/qsv/bin/python3" ]; then
+    VENV_PYTHON="$HOME/.venvs/qsv/bin/python3"
+  else
+    # Fallback: use whatever python3 is on PATH
+    VENV_PYTHON="python3"
+  fi
 fi
+
+# Model cache lives on A: (1.6TB, survives distro rebuilds). The default cache
+# previously sat on D:\cache (deleted when D: filled) and the distro's own VHD
+# is on the nearly-full C: — A: is the only drive with real headroom.
+export HF_HOME="${HF_HOME:-/mnt/a/cache/huggingface}"
 
 "$VENV_PYTHON" -m uvicorn src.agent.server:app \
     --host 0.0.0.0 \

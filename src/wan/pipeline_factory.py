@@ -22,7 +22,7 @@ from typing import Optional
 
 import torch
 from diffusers import AutoencoderKLWan, WanPipeline
-from transformers import AutoTokenizer, UMT5EncoderModel
+from transformers import UMT5EncoderModel
 
 from ..quant.config import QuantConfig
 
@@ -90,7 +90,9 @@ class WanPipelineFactory:
         if engine == "gguf" and gguf_model_path is None:
             raise ValueError(
                 "engine='gguf' requires gguf_model_path. "
-                f"Download a GGUF file from {GGUF_HF_REPO} on HuggingFace."
+                f"Download a GGUF file from {GGUF_HF_REPO} on HuggingFace.\n"
+                f"  huggingface-cli download {GGUF_HF_REPO} {GGUF_Q4_0_FILENAME} "
+                "--local-dir ./models/gguf/"
             )
 
     def __call__(self, quant_config: Optional[QuantConfig]):
@@ -190,6 +192,14 @@ class WanPipelineFactory:
 
         VRAM profile (14B Q4_0): ~7–8 GB transformer + ~1 GB VAE + T5 on CPU ≈ 9 GB.
         """
+        from pathlib import Path as _Path
+        if not _Path(self.gguf_model_path).exists():
+            raise FileNotFoundError(
+                f"GGUF model file not found: {self.gguf_model_path}\n"
+                f"Download with: huggingface-cli download {GGUF_HF_REPO} "
+                f"{GGUF_Q4_0_FILENAME} --local-dir ./models/gguf/"
+            )
+
         from diffusers import GGUFQuantizationConfig, WanTransformer3DModel
 
         dtype_map = {

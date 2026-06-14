@@ -218,6 +218,93 @@ class TestInfinitePipelineRunner:
         assert d1.segment_idx == 1
         assert director.segment_count == 2
 
+    @pytest.mark.anyio
+    async def test_segment_generation_failure_continues_pipeline(self, tmp_path):
+        """A failing generate_video call in the non-RGBA path should not abort the run.
+
+        The pipeline must record an error entry for the failed segment and continue
+        to the next one — task status should be 'done', not 'error'.
+        """
+        import sys
+        import types
+        from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
+
+        # First segment fails, second succeeds.
+        call_count = {"n": 0}
+
+        def _flaky_generate_video(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated GPU OOM on seg 0")
+
+        fake_module = types.ModuleType("src.wan.generate")
+        fake_module.generate_video = _flaky_generate_video
+        fake_module.generate_video_stacked = MagicMock()
+        fake_module.generate_long_video = MagicMock()
+        sys.modules.setdefault("src.wan", types.ModuleType("src.wan"))
+        sys.modules["src.wan.generate"] = fake_module
+
+        task_id = "test-fault-iso-001"
+        _registry.create(task_id)
+        req = InfiniteRequest(
+            prompt="Ocean waves",
+            max_segments=2,
+            use_rgba_layers=False,
+            output_dir=str(tmp_path),
+        )
+        (tmp_path / "infinite" / task_id[:8]).mkdir(parents=True, exist_ok=True)
+        await _run_infinite_gen(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "done", f"expected done, got {state['status']}: {state.get('error')}"
+        segments = state["result"]["segments"]
+        assert len(segments) == 2
+        # Segment 0 recorded the error
+        failed = next(s for s in segments if s["segment_idx"] == 0)
+        assert failed["output_path"] is None
+        assert "error" in failed
+        # Segment 1 succeeded
+        succeeded = next(s for s in segments if s["segment_idx"] == 1)
+        assert succeeded["output_path"] is not None
+
+    @pytest.mark.anyio
+    async def test_rgba_fallback_failure_continues_pipeline(self, tmp_path):
+        """When RGBA layer gen fails AND single-pass fallback also fails, the pipeline
+        should record an error entry and continue to the next segment.
+        """
+        import sys
+        import types
+        from src.agent.server import _registry, _run_infinite_gen, InfiniteRequest
+
+        # generate_video always raises (both RGBA layer gen and fallback call it)
+        def _always_fail(**kwargs):
+            raise RuntimeError("simulated GPU failure")
+
+        fake_module = types.ModuleType("src.wan.generate")
+        fake_module.generate_video = _always_fail
+        fake_module.generate_video_stacked = MagicMock()
+        fake_module.generate_long_video = MagicMock()
+        sys.modules.setdefault("src.wan", types.ModuleType("src.wan"))
+        sys.modules["src.wan.generate"] = fake_module
+
+        task_id = "test-fault-iso-002"
+        _registry.create(task_id)
+        req = InfiniteRequest(
+            prompt="Desert at sunrise",
+            max_segments=1,
+            use_rgba_layers=True,
+            output_dir=str(tmp_path),
+        )
+        (tmp_path / "infinite" / task_id[:8]).mkdir(parents=True, exist_ok=True)
+        await _run_infinite_gen(task_id, req)
+
+        state = _registry.get(task_id)
+        assert state["status"] == "done", f"expected done, got {state['status']}: {state.get('error')}"
+        segments = state["result"]["segments"]
+        assert len(segments) == 1
+        assert segments[0]["output_path"] is None
+        assert "error" in segments[0]
+
 
 # ---------------------------------------------------------------------------
 # POST /generate/composite endpoint

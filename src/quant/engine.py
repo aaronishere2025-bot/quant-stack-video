@@ -127,8 +127,7 @@ class QuantStackEngine:
                 device = pipe.device if hasattr(pipe, 'device') else "cuda"
                 gen = self._make_generator(seed + i if seed is not None else None, str(device))
                 output = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
+                    **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
                     height=height,
                     width=width,
                     num_frames=num_frames,
@@ -164,8 +163,7 @@ class QuantStackEngine:
                 device = pipe.device if hasattr(pipe, 'device') else "cuda"
                 gen = self._make_generator(seed + i if seed is not None else None, str(device))
                 output = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
+                    **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
                     height=height,
                     width=width,
                     num_frames=num_frames,
@@ -206,8 +204,7 @@ class QuantStackEngine:
                 device = pipe.device if hasattr(pipe, 'device') else "cuda"
                 gen = self._make_generator(seed if i == 0 else seed + i if seed is not None else None, str(device))
                 output = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
+                    **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
                     height=height,
                     width=width,
                     num_frames=num_frames,
@@ -266,8 +263,7 @@ class QuantStackEngine:
                 if i == 0 or prev_frames is None:
                     # First pass: standard text-to-video generation
                     output = pipe(
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
+                        **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
                         height=height,
                         width=width,
                         num_frames=num_frames,
@@ -339,8 +335,7 @@ class QuantStackEngine:
 
         # Fallback: standard generation (independent pass)
         return pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
             height=height,
             width=width,
             num_frames=num_frames,
@@ -411,8 +406,7 @@ class QuantStackEngine:
         # Run denoising with the noisy latents as starting point
         # Note: not all pipelines support latents kwarg — catch and fallback
         output = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            **self._prompt_kwargs(pipe, prompt, negative_prompt, guidance_scale),
             height=height,
             width=width,
             num_frames=num_frames,
@@ -451,3 +445,42 @@ class QuantStackEngine:
             "all_pass_frames": all_pass_frames,
             "total_time": sum(self._pass_times),
         }
+
+    def _prompt_kwargs(self, pipe, prompt, negative_prompt, guidance_scale):
+        """Return the prompt-related kwargs for a pipe() call, encoding on CPU.
+
+        UMT5-XXL (~6 GB bf16) is otherwise pulled onto the GPU by model_cpu_offload
+        during in-pipeline encoding and, combined with full-length (81-frame /
+        480×832) activations, OOMs a 12 GB card — once per stacked pass. Forcing the
+        text encoder to CPU and passing prompt_embeds keeps it off the GPU entirely.
+        Same fix as wan/generate.py::generate_video; see docs/benchmark_gguf_vs_bnb.md.
+
+        Falls back to plain prompt= kwargs if the pipe has no separable text encoder.
+        """
+        import gc
+        import torch
+        if getattr(pipe, "text_encoder", None) is None:
+            return {"prompt": prompt, "negative_prompt": negative_prompt}
+        try:
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(pipe.text_encoder, recurse=True)
+        except Exception:
+            pass
+        pipe.text_encoder = pipe.text_encoder.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+        do_cfg = guidance_scale > 1.0
+        pe_cpu, ne_cpu = pipe.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt if do_cfg else None,
+            do_classifier_free_guidance=do_cfg,
+            num_videos_per_prompt=1,
+            device=torch.device("cpu"),
+        )
+        kwargs = {"prompt_embeds": pe_cpu.to("cuda")}
+        if ne_cpu is not None:
+            kwargs["negative_prompt_embeds"] = ne_cpu.to("cuda")
+        del pe_cpu, ne_cpu
+        gc.collect()
+        torch.cuda.empty_cache()
+        return kwargs

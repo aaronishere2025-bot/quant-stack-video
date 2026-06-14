@@ -1098,7 +1098,10 @@ async def _run_single_gen(task_id: str, req: SinglePassRequest):
         output_path = str(output_dir / f"{task_id[:8]}_{req.quant_type}.mp4")
 
         _registry.update(task_id, progress=f"Generating ({req.quant_type})...")
-        saved = generate_video(
+        # to_thread: the sync GPU call would otherwise block the event loop for
+        # minutes, freezing /health and /tasks polls (callers see the agent as down).
+        saved = await asyncio.to_thread(
+            generate_video,
             prompt=req.prompt,
             output_path=output_path,
             model_id=req.model_id,
@@ -1132,7 +1135,8 @@ async def _run_stacked_gen(task_id: str, req: StackedRequest):
         for i in range(req.num_passes):
             _registry.update(task_id, progress=f"Pass {i + 1}/{req.num_passes}...")
 
-        result = generate_video_stacked(
+        result = await asyncio.to_thread(
+            generate_video_stacked,
             prompt=req.prompt,
             output_path=output_path,
             model_id=req.model_id,
@@ -1148,6 +1152,9 @@ async def _run_stacked_gen(task_id: str, req: StackedRequest):
             cache_dir=req.cache_dir,
             fps=req.fps,
         )
+        # The engine result carries the raw frame array — not JSON-serializable;
+        # the mp4 is already on disk, so store metadata only.
+        result.pop("frames", None)
         _registry.update(task_id, status="done", result=result)
         _deduct_for_task(task_id, req.num_frames, req.fps)
     except Exception as e:
@@ -1164,7 +1171,8 @@ async def _run_long_gen(task_id: str, req: LongVideoRequest):
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(output_dir / f"{task_id[:8]}_long_{int(req.duration_seconds)}s.mp4")
 
-        result = generate_long_video(
+        result = await asyncio.to_thread(
+            generate_long_video,
             prompt=req.prompt,
             output_path=output_path,
             duration_seconds=req.duration_seconds,
@@ -1517,11 +1525,46 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
 
                 except Exception as layer_err:
                     logger.warning("[infinite %s] RGBA layer generation failed (%s); falling back to single pass", task_id[:8], layer_err)
+                    try:
+                        from ..wan.generate import generate_video
+                        generate_video(
+                            prompt=seg_prompt,
+                            output_path=seg_path,
+                            model_id=req.model_id,
+                            height=req.height,
+                            width=req.width,
+                            num_frames=req.segment_frames,
+                            num_inference_steps=req.num_inference_steps,
+                            guidance_scale=req.guidance_scale,
+                            seed=req.seed + segment_idx,
+                            quant_type="4bit",
+                            cache_dir=req.cache_dir,
+                            fps=req.fps,
+                        )
+                    except Exception as fallback_err:
+                        logger.error(
+                            "[infinite %s] seg=%d RGBA fallback also FAILED: %s — recording error, continuing",
+                            task_id[:8], segment_idx, fallback_err,
+                        )
+                        segment_results.append({
+                            "segment_idx": segment_idx,
+                            "output_path": None,
+                            "prompt": seg_prompt,
+                            "drift_score": 0.0,
+                            "scene_change": directive.is_scene_change,
+                            "error": str(fallback_err),
+                        })
+                        segment_idx += 1
+                        gc.collect()
+                        continue
+            else:
+                try:
                     from ..wan.generate import generate_video
                     generate_video(
                         prompt=seg_prompt,
                         output_path=seg_path,
                         model_id=req.model_id,
+                        negative_prompt=req.negative_prompt,
                         height=req.height,
                         width=req.width,
                         num_frames=req.segment_frames,
@@ -1531,36 +1574,35 @@ async def _run_infinite_gen(task_id: str, req: InfiniteRequest):
                         quant_type="4bit",
                         cache_dir=req.cache_dir,
                         fps=req.fps,
+                        engine=engine,
+                        image_path=prev_frame_path,
                     )
-            else:
-                from ..wan.generate import generate_video
-                generate_video(
-                    prompt=seg_prompt,
-                    output_path=seg_path,
-                    model_id=req.model_id,
-                    negative_prompt=req.negative_prompt,
-                    height=req.height,
-                    width=req.width,
-                    num_frames=req.segment_frames,
-                    num_inference_steps=req.num_inference_steps,
-                    guidance_scale=req.guidance_scale,
-                    seed=req.seed + segment_idx,
-                    quant_type="4bit",
-                    cache_dir=req.cache_dir,
-                    fps=req.fps,
-                    engine=engine,
-                    image_path=prev_frame_path,
-                )
-                # Drift metric: save first frame for boundary SSIM computation
-                try:
-                    from ..rgba.compositor import save_first_frame_from_video
-                    first_frame_p = seg_path.replace(".mp4", "_first_frame.png")
-                    save_first_frame_from_video(seg_path, first_frame_p)
-                except Exception:
-                    pass
-                # EchoShot: update prev_frame_path for next segment
-                candidate = seg_path.replace(".mp4", "_last_frame.png")
-                prev_frame_path = candidate if Path(candidate).exists() else None
+                    # Drift metric: save first frame for boundary SSIM computation
+                    try:
+                        from ..rgba.compositor import save_first_frame_from_video
+                        first_frame_p = seg_path.replace(".mp4", "_first_frame.png")
+                        save_first_frame_from_video(seg_path, first_frame_p)
+                    except Exception:
+                        pass
+                    # EchoShot: update prev_frame_path for next segment
+                    candidate = seg_path.replace(".mp4", "_last_frame.png")
+                    prev_frame_path = candidate if Path(candidate).exists() else None
+                except Exception as seg_err:
+                    logger.error(
+                        "[infinite %s] seg=%d single-pass generation FAILED: %s — recording error, continuing",
+                        task_id[:8], segment_idx, seg_err,
+                    )
+                    segment_results.append({
+                        "segment_idx": segment_idx,
+                        "output_path": None,
+                        "prompt": seg_prompt,
+                        "drift_score": 0.0,
+                        "scene_change": directive.is_scene_change,
+                        "error": str(seg_err),
+                    })
+                    segment_idx += 1
+                    gc.collect()
+                    continue
 
             # --- Step 3: VACE temporal handoff ---
             # In production, latents come directly from the DiT without VAE decode.

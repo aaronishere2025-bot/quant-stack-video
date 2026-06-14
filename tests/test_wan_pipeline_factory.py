@@ -113,6 +113,14 @@ class TestWanPipelineFactoryGGUF:
             f(None)
             mock_build.assert_called_once()
 
+    def test_gguf_missing_file_raises_file_not_found(self, tmp_path):
+        """_build_gguf_pipeline should raise FileNotFoundError if the .gguf file is missing."""
+        from src.wan.pipeline_factory import WanPipelineFactory
+        missing = str(tmp_path / "nonexistent_model.gguf")
+        f = WanPipelineFactory(engine="gguf", gguf_model_path=missing)
+        with pytest.raises(FileNotFoundError, match="not found"):
+            f._build_gguf_pipeline()
+
 
 class TestApplyMemoryOpts:
     def test_vae_slicing_applied(self):
