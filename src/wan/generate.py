@@ -79,6 +79,8 @@ def generate_video(
     factory = WanPipelineFactory(
         model_id=model_id,
         cache_dir=cache_dir,
+        # VAE tiling is required for ≥768px decode on 12GB; 832px width OOMs without it.
+        enable_vae_tiling=True,
     )
 
     if quant_type == "4bit":
@@ -88,23 +90,66 @@ def generate_video(
     else:
         qcfg = QuantConfig(quant_type="none", load_in_4bit=False, load_in_8bit=False)
 
+    import gc
     import torch
     pipe = factory(qcfg)
+
+    # CPU-side text encoding. UMT5-XXL (~6 GB bf16) is otherwise pulled onto the GPU
+    # by model_cpu_offload during encoding and, combined with full-length
+    # (81-frame / 480×832) activations, OOMs the 4070. Encoding on CPU and passing
+    # prompt_embeds keeps the encoder off the GPU entirely — the proven fit-on-12GB
+    # path from docs/benchmark_gguf_vs_bnb.md (2026-05-10).
+    prompt_embeds = negative_embeds = None
+    if getattr(pipe, "text_encoder", None) is not None:
+        try:
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(pipe.text_encoder, recurse=True)
+        except Exception:
+            pass
+        pipe.text_encoder = pipe.text_encoder.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+        do_cfg = guidance_scale > 1.0
+        pe_cpu, ne_cpu = pipe.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt if do_cfg else None,
+            do_classifier_free_guidance=do_cfg,
+            num_videos_per_prompt=1,
+            device=torch.device("cpu"),
+        )
+        prompt_embeds = pe_cpu.to("cuda")
+        negative_embeds = ne_cpu.to("cuda") if ne_cpu is not None else None
+        del pe_cpu, ne_cpu
+        gc.collect()
+        torch.cuda.empty_cache()
 
     gen = torch.Generator(device="cuda")
     gen.manual_seed(seed)
 
-    output = pipe(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        height=height,
-        width=width,
-        num_frames=num_frames,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        generator=gen,
-        output_type="np",
-    )
+    if prompt_embeds is not None:
+        output = pipe(
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_embeds,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=gen,
+            output_type="np",
+        )
+    else:
+        output = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=gen,
+            output_type="np",
+        )
 
     frames = output.frames[0]  # (T, H, W, C)
     saved = _save_video(frames, output_path, fps=fps)
