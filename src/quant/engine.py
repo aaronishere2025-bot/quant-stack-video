@@ -94,8 +94,12 @@ class QuantStackEngine:
                 height, width, num_frames, num_inference_steps, guidance_scale, seed, **extra_kwargs
             )
         finally:
-            # Release the cached CPU embeds (a few MB each) once the run is done.
+            # Release the cached CPU embeds (a few MB each) and any resident pipeline
+            # components (6 GB encoder, transformers) the factory kept across passes.
             self._embed_cache.clear()
+            clear = getattr(pipeline_factory, "clear_cache", None)
+            if callable(clear):
+                clear()
 
     def _dispatch_strategy(
         self, strategy, pipeline_factory, prompt, negative_prompt,

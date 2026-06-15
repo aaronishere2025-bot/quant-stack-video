@@ -87,6 +87,15 @@ class WanPipelineFactory:
         self.gguf_model_path = gguf_model_path
         self.gguf_compute_dtype = gguf_compute_dtype
 
+        # Resident-component cache. Stacking calls the factory once per pass; the
+        # text encoder (6 GB UMT5) and VAE are identical every pass, and the
+        # transformer only varies by quant signature ([nf4, fp4, nf4] → 2 distinct).
+        # Re-reading them from the 27 GB disk cache each pass dominates per-pass time.
+        # With model_cpu_offload the cached modules live on CPU between passes (only
+        # the active one streams to GPU), so this trades CPU RAM for time — VRAM peak
+        # is unchanged. Scoped to one generation; cleared via clear_cache().
+        self._component_cache: dict = {}
+
         if engine == "gguf" and gguf_model_path is None:
             raise ValueError(
                 "engine='gguf' requires gguf_model_path. "
@@ -133,34 +142,10 @@ class WanPipelineFactory:
         )
 
         if bnb_config is not None:
-            # Load transformer with quantization; other components in higher precision
-            from diffusers import WanTransformer3DModel
-
-            logger.info("Loading quantized transformer (CPU staging to avoid double-buffer OOM)...")
-            transformer = WanTransformer3DModel.from_pretrained(
-                self.model_id,
-                subfolder="transformer",
-                quantization_config=bnb_config,
-                torch_dtype=transformer_dtype,
-                device_map="cpu",
-                cache_dir=self.cache_dir,
-            )
-
-            logger.info("Loading text encoder (bf16)...")
-            text_encoder = UMT5EncoderModel.from_pretrained(
-                self.model_id,
-                subfolder="text_encoder",
-                torch_dtype=text_dtype,
-                cache_dir=self.cache_dir,
-            )
-
-            logger.info("Loading VAE (bf16)...")
-            vae = AutoencoderKLWan.from_pretrained(
-                self.model_id,
-                subfolder="vae",
-                torch_dtype=vae_dtype,
-                cache_dir=self.cache_dir,
-            )
+            # Load (or reuse) components; only the transformer varies by quant config.
+            transformer = self._get_or_load_transformer(qcfg, bnb_config, transformer_dtype)
+            text_encoder = self._get_or_load_text_encoder(text_dtype)
+            vae = self._get_or_load_vae(vae_dtype)
 
             logger.info("Assembling pipeline...")
             pipe = WanPipeline.from_pretrained(
@@ -252,6 +237,87 @@ class WanPipelineFactory:
         )
 
         return self._apply_memory_opts(pipe)
+
+    def _reset_for_reuse(self, module):
+        """Detach stale accelerate offload hooks from a cached module before it is
+        re-assembled into a new pipeline. enable_model_cpu_offload() on the new pipe
+        re-attaches fresh hooks; leaving the old ones causes double-hook errors and
+        wrong device placement. We do NOT force a device move — bnb-4bit modules
+        reject .to(); offload manages placement from wherever the weights reside."""
+        try:
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(module, recurse=True)
+        except Exception:
+            pass
+        return module
+
+    def _transformer_key(self, qcfg):
+        return (
+            "transformer", qcfg.quant_type, qcfg.bnb_4bit_quant_type,
+            qcfg.bnb_4bit_use_double_quant, qcfg.load_in_8bit, qcfg.torch_dtype,
+        )
+
+    def _get_or_load_transformer(self, qcfg, bnb_config, transformer_dtype):
+        key = self._transformer_key(qcfg)
+        cached = self._component_cache.get(key)
+        if cached is not None:
+            logger.info(f"Reusing resident transformer (cached: {qcfg.bnb_4bit_quant_type})")
+            return self._reset_for_reuse(cached)
+        from diffusers import WanTransformer3DModel
+        logger.info("Loading quantized transformer (CPU staging to avoid double-buffer OOM)...")
+        transformer = WanTransformer3DModel.from_pretrained(
+            self.model_id,
+            subfolder="transformer",
+            quantization_config=bnb_config,
+            torch_dtype=transformer_dtype,
+            device_map="cpu",
+            cache_dir=self.cache_dir,
+        )
+        self._component_cache[key] = transformer
+        return transformer
+
+    def _get_or_load_text_encoder(self, text_dtype):
+        cached = self._component_cache.get("text_encoder")
+        if cached is not None:
+            logger.info("Reusing resident text encoder (cached)")
+            return self._reset_for_reuse(cached)
+        logger.info("Loading text encoder (bf16)...")
+        text_encoder = UMT5EncoderModel.from_pretrained(
+            self.model_id,
+            subfolder="text_encoder",
+            torch_dtype=text_dtype,
+            cache_dir=self.cache_dir,
+        )
+        self._component_cache["text_encoder"] = text_encoder
+        return text_encoder
+
+    def _get_or_load_vae(self, vae_dtype):
+        cached = self._component_cache.get("vae")
+        if cached is not None:
+            logger.info("Reusing resident VAE (cached)")
+            return self._reset_for_reuse(cached)
+        logger.info("Loading VAE (bf16)...")
+        vae = AutoencoderKLWan.from_pretrained(
+            self.model_id,
+            subfolder="vae",
+            torch_dtype=vae_dtype,
+            cache_dir=self.cache_dir,
+        )
+        self._component_cache["vae"] = vae
+        return vae
+
+    def clear_cache(self):
+        """Drop all resident components and free memory. Called after a stacked run
+        so the 6 GB encoder + transformers don't linger in CPU RAM between requests."""
+        self._component_cache.clear()
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def _apply_memory_opts(self, pipe):
         """Apply VAE slicing, tiling, and CPU offload settings to a pipeline."""
