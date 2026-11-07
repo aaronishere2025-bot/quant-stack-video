@@ -43,11 +43,28 @@ cd "$REPO" || { log "ERROR: repo $REPO missing"; exit 1; }
 if [ ! -x "$VENV_PY" ]; then log "ERROR: venv python missing at $VENV_PY"; exit 1; fi
 export HF_HOME="${HF_HOME:-/mnt/a/cache/huggingface}"
 
-nohup "$VENV_PY" -m uvicorn src.agent.server:app \
+# Memory cap (2026-11-06): uvicorn grew to ~20 GB over ~a day and took the whole
+# 24 GB WSL VM down (kernel OOM kill 11-05, pid 1163, anon-rss 19.9 GB). Running it
+# in a user systemd scope with MemoryMax means only this process is OOM-killed and
+# the next watchdog tick restarts it. Override with QSV_MEMORY_MAX / QSV_SWAP_MAX.
+MEM_MAX="${QSV_MEMORY_MAX:-16G}"
+SWAP_MAX="${QSV_SWAP_MAX:-2G}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+CAP=()
+CAP_DESC="none"
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  CAP=(systemd-run --user --scope --quiet --unit="qsv-uvicorn-$(date +%s)"
+       -p MemoryMax="$MEM_MAX" -p MemorySwapMax="$SWAP_MAX")
+  CAP_DESC="MemoryMax=$MEM_MAX MemorySwapMax=$SWAP_MAX"
+else
+  log "WARN: user systemd unavailable — starting uvicorn WITHOUT a memory cap"
+fi
+
+nohup "${CAP[@]}" "$VENV_PY" -m uvicorn src.agent.server:app \
     --host 127.0.0.1 --port "$PORT" --log-level info \
     >> "$LOG_DIR/service.log" 2>&1 &
 pid=$!
-log "started uvicorn pid $pid"
+log "started uvicorn pid $pid (memory cap: $CAP_DESC)"
 
 # Brief confirm; /health comes up fast (the model loads lazily on first generate).
 for _ in $(seq 1 10); do
